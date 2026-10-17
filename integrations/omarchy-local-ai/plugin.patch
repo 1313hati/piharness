@@ -1,0 +1,292 @@
+diff --git i/Model.js w/Model.js
+index 9fc0bcc..9730d23 100644
+--- i/Model.js
++++ w/Model.js
+@@ -582,7 +582,7 @@ function weights(rows, list) {
+ // Agent identity and actions keep the same rows and buttons as the rest of the panel.
+ function agentName(a) {
+   return ({ pi: "pi", claude: "Claude Code", codex: "Codex", opencode: "OpenCode", omp: "oh-my-pi",
+-    crush: "Crush", grok: "Grok", copilot: "GitHub Copilot", hermes: "Hermes" })[a] || a || "Choose an agent"
++    crush: "Crush", grok: "Grok", copilot: "GitHub Copilot", hermes: "Hermes", piharness: "piharness" })[a] || a || "Choose an agent"
+ }
+ // The agent: closed, one row with the one chosen; opened, every agent once, the chosen one marked (a check, an ink
+ // bar), each of the others choosing itself. Then default and update for the chosen one, and the folder.
+@@ -659,6 +659,30 @@ function settingsView(s, ui) {
+ function build(s, ui) {
+   s = s || {}
+   var v = (ui.view === "settings" ? settingsView(s, ui) : ui.view === "folder" ? folderView(s, ui) : ui.view === "agents" ? agentsView(s, ui) : ui.view === "run" ? runView(s, ui.id, ui) : ui.view === "kind" ? kindView(s, ui.id, ui) : ui.view === "gpus" ? gpusView(s, ui) : ui.view === "group" ? groupView(s, ui.id, Number(ui.key), ui) : null) || homeView(s, ui)
++  if (s.coder && (!ui.view || ui.view === "home")) {
++    var c = s.coder
++    // Token counters come from llama-server's own /slots: the panel's usual token line reads the gateway log,
++    // which never sees a model coder.sh started.
++    var head = [
++      { type: "sec", label: "CODER.SH · QWEN3.8 27B" },
++      { type: "field", icon: "machine", label: "server", value: c.state },
++      { type: "field", icon: "context", label: "context", value: String(c.context) + " · UD-Q4_K_XL · MTP" }
++    ]
++    if (c.tokens) head.push({ type: "field", icon: "tokens", label: "tokens", value: c.tokens })
++    if (c.speed) head.push({ type: "field", icon: "speed", label: "speed",
++      value: c.speed + (c.contextUsed ? " · " + c.contextUsed + " ctx" : "") + (c.requests ? " · " + c.requests + " req" : "") })
++    v.rows = head.concat([
++      { type: "acts", items: [
++        { label: "Start", action: c.pid ? "" : "coder|start" },
++        { label: "Stop", action: c.pid ? "coder|stop" : "", danger: true },
++        { label: "Claude", action: "coder|claude" },
++        { label: "Pi", action: "coder|pi" },
++        { label: "piharness", action: "coder|piharness" },
++        { label: "Hermes", action: "coder|hermes" },
++        { label: "Logs", action: "coder|logs" }
++      ] }
++    ]).concat(v.rows)
++  }
+   // usage reporting is off until you choose: home asks once, and either answer is kept and ends the question; No thanks
+   // comes first, so the first keyboard focus never turns it on
+   if (s.reporting === "unset" && (!ui.view || ui.view === "home"))
+@@ -670,7 +694,7 @@ function build(s, ui) {
+       items: [{ label: ui.updatingAgent === "plugin" ? "Updating…" : "Update Local AI", action: ui.updatingAgent ? "" : "update|plugin" }] })
+   if (ui.problem || ui.pollProblem || s.setupError) v.rows.unshift({ type: "error", label: ui.problem || ui.pollProblem || s.setupError })
+   else if (ui.notice) v.rows.unshift({ type: "banner", text: ui.notice })
+-  return Object.assign(v, { mark: ui.problem || ui.pollProblem || s.setupError ? "failed" : mark(s) })
++  return Object.assign(v, { mark: ui.problem || ui.pollProblem || s.setupError ? "failed" : mark(s) || (s.coder && s.coder.state === "ready" ? "ready" : s.coder && s.coder.pid ? "busy" : "") })
+ }
+ 
+ if (typeof module !== "undefined") module.exports = { build: build, parse: parse, tones: tones, catalog: catalog, cardText: cardText }
+diff --git i/Panel.qml w/Panel.qml
+index 7b6208d..432874e 100644
+--- i/Panel.qml
++++ w/Panel.qml
+@@ -17,7 +17,7 @@ Panel {
+   implicitHeight: button.implicitHeight
+ 
+   // the URL keeps a "%", "#" or "?" in the plugin's path encoded
+-  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/omarchy-local-ai")).replace(/^file:\/\//, ""))
++  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/omarchy-local-ai-coder")).replace(/^file:\/\//, ""))
+   readonly property color theme: bar ? bar.foreground : Color.foreground
+   // the dots sit on the bar, which may be transparent: they take the bar's own foreground, as Omarchy's buttons do
+   readonly property color dotTone: bar && bar.barForeground !== undefined ? bar.barForeground : theme
+@@ -205,6 +205,7 @@ Panel {
+     ui = Object.assign({}, ui, { notice: "", problem: "" })
+     var a = (action || "").split("|")
+     switch (a[0]) {
++    case "coder": run(["coder-" + a[1]]); break
+     case "forget": run(["forget", a[1]]); nav({ open: "" }); break
+     // a folder a recipe no longer offered left behind (the snapshot's unoffered)
+     case "discard": run(["forget", "--folder", a[1]]); break
+diff --git i/bin/omarchy-local-ai-coder w/bin/omarchy-local-ai-coder
+new file mode 100755
+index 0000000..ac34fd0
+--- /dev/null
++++ w/bin/omarchy-local-ai-coder
+@@ -0,0 +1,212 @@
++#!/usr/bin/env python3
++"""Local integration: share coder.sh's native server with the Local AI panel."""
++import contextlib
++import fcntl
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import time
++import urllib.request
++
++HOME = Path.home()
++BACKEND = Path(__file__).resolve().with_name('omarchy-local-ai')
++CODER = HOME / 'coder.sh'
++STATE = HOME / '.local/state/coder'
++KEYS = {'nvidia:0', 'nvidia:1'}
++
++
++def fail(message):
++    print('local-ai: ' + message, file=sys.stderr)
++    raise SystemExit(1)
++
++
++def _k(n):
++    """49293 -> '49.3k', 1580 -> '1.6k', 900 -> '900'."""
++    if not isinstance(n, (int, float)) or n <= 0:
++        return '0'
++    if n < 1000:
++        return str(int(n))
++    if n < 100000:
++        return f'{n / 1000:.1f}k'
++    return f'{n / 1000:.0f}k'
++
++
++def track(slot):
++    """Turn one /slots entry into token, context and decode-rate figures.
++
++    A rate needs two samples, so the previous one is kept in
++    ~/.local/state/coder/live.json: the delta over the interval is t/s, and a
++    new id_task means a new request.
++    """
++    if not slot:
++        return {}
++    nxt = slot.get('next_token') or [{}]
++    nxt = nxt[0] if isinstance(nxt, list) and nxt else {}
++    prompt = int(slot.get('n_prompt_tokens') or 0)
++    cached = int(slot.get('n_prompt_tokens_cache') or 0)
++    out = int(nxt.get('n_decoded') or 0)
++    task = slot.get('id_task')
++    processing = bool(slot.get('is_processing'))
++    ctx = int(slot.get('n_ctx') or 0)
++
++    now = time.time()
++    prev, requests = {}, 0
++    path = STATE / 'live.json'
++    try:
++        prev = json.loads(path.read_text())
++        requests = int(prev.get('requests') or 0)
++    except (OSError, ValueError):
++        prev = {}
++
++    # The panel polls every 1.5-5 s, but the bar also runs snapshot every 30 s,
++    # so short gaps reuse the last rate instead of reporting noise.
++    speed = float(prev.get('speed') or 0.0)
++    same = prev.get('task') == task and prev.get('decoded') is not None
++    if same:
++        dt = now - float(prev.get('ts') or 0)
++        dd = out - int(prev.get('decoded') or 0)
++        if dt >= 1.0 and dt < 120 and dd >= 0:
++            speed = dd / dt
++    else:
++        speed = 0.0
++    if task is not None and prev.get('task') != task:
++        requests += 1
++
++    try:
++        STATE.mkdir(parents=True, exist_ok=True)
++        path.write_text(json.dumps({'task': task, 'decoded': out, 'ts': now, 'requests': requests, 'speed': speed}))
++    except OSError:
++        pass
++
++    return {
++        'processing': processing,
++        'tokens': f'{_k(prompt)} in · {_k(out)} out',
++        'contextUsed': f'{_k(prompt + out)} / {_k(ctx)}' if ctx else _k(prompt + out),
++        'promptTokens': prompt,
++        'cachedTokens': cached,
++        'outputTokens': out,
++        'speed': f'{speed:.1f} t/s' if speed > 0 else ('generating' if processing else 'idle'),
++        'requests': requests,
++        'task': task,
++    }
++
++
++def native_state():
++    pid = None
++    for p in Path('/proc').glob('[0-9]*'):
++        try:
++            if p.stat().st_uid != os.getuid() or (p / 'exe').resolve().name != 'llama-server':
++                continue
++            args = (p / 'cmdline').read_bytes().split(b'\0')
++            if b'qwen38' in args and b'8080' in args:
++                pid = int(p.name)
++                break
++        except (OSError, RuntimeError):
++            pass
++    result = {'state': 'loading' if pid else 'stopped', 'pid': pid, 'context': 65536}
++    if pid:
++        try:
++            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
++            with opener.open('http://127.0.0.1:8080/health', timeout=1) as r:
++                ready = json.load(r).get('status') == 'ok'
++            if ready:
++                result['state'] = 'ready'
++                try:
++                    with opener.open('http://127.0.0.1:8080/slots', timeout=1) as r:
++                        slots = json.load(r)
++                    if isinstance(slots, list) and slots:
++                        slot = max(slots, key=lambda x: (x.get('id_task') or 0))
++                        result['context'] = int(slot.get('n_ctx') or result['context'])
++                        result.update(track(slot))
++                except (OSError, ValueError, KeyError, TypeError):
++                    pass
++        except (OSError, ValueError, KeyError):
++            pass
++    return result
++
++
++def snapshot():
++    return json.loads(subprocess.check_output([str(BACKEND), 'snapshot'], text=True))
++
++
++@contextlib.contextmanager
++def start_lock():
++    STATE.mkdir(parents=True, exist_ok=True)
++    with (STATE / 'plugin-start.lock').open('a') as lock:
++        try:
++            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            fail('A model is starting. Wait for startup to finish.')
++        yield
++
++
++def ensure_cards_free():
++    s = snapshot()
++    for d in s.get('deployments', []):
++        if d.get('state') != 'error' and KEYS.intersection(d.get('keys', [])):
++            fail('Stop ' + d.get('name', 'the Docker model') + ' in Local AI before starting coder.sh.')
++
++
++def terminal(action):
++    # Run in Local AI's chosen folder; each agent uses coder.sh's own configuration.
++    settings = HOME / '.local/state/omarchy/local-ai/settings.json'
++    try:
++        folder = Path(json.loads(settings.read_text()).get('folder', str(HOME))).expanduser()
++    except (OSError, ValueError):
++        folder = HOME
++    os.chdir(folder if folder.is_dir() else HOME)
++    env = dict(os.environ, SERVER_LAUNCH='background', KEEP_SERVER='1')
++    if action in ('start', 'pi', 'claude', 'hermes', 'piharness'):
++        with start_lock():
++            ensure_cards_free()
++            rc = subprocess.call(['bash', str(CODER), '--start'], env=env)
++        if rc:
++            return rc
++        if action != 'start':
++            return subprocess.call(['bash', str(CODER), action], env=env)
++        return 0
++    return subprocess.call(['bash', str(CODER), '--' + action], env=env)
++
++
++def main():
++    args = sys.argv[1:]
++    if args == ['snapshot']:
++        s = snapshot()
++        c = native_state()
++        s['coder'] = c
++        if c['pid']:
++            for g in s.get('gpus', []):
++                if g.get('key') in KEYS:
++                    g.update(busy=True, held=True)
++            for k in s.get('kinds', []):
++                k['free'] = [key for key in k.get('free', []) if key not in KEYS]
++        print(json.dumps(s))
++    elif len(args) == 1 and args[0] in ('coder-start', 'coder-stop', 'coder-pi', 'coder-claude', 'coder-hermes', 'coder-piharness', 'coder-logs'):
++        subprocess.Popen(['omarchy-launch-tui', '--app-id=org.omarchy.coder', str(Path(__file__).resolve()),
++                          '--terminal', args[0][6:]], start_new_session=True,
++                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    elif len(args) == 2 and args[0] == '--terminal' and args[1] in ('start', 'stop', 'pi', 'claude', 'hermes', 'piharness', 'logs'):
++        try:
++            rc = terminal(args[1])
++        except SystemExit as e:
++            rc = e.code
++        if rc or args[1] == 'logs':
++            try:
++                input('\nPress Enter to close. ')
++            except EOFError:
++                pass
++        return rc
++    elif args and args[0] == 'run':
++        with start_lock():
++            if native_state()['pid'] and len(args) > 2 and KEYS.intersection(args[2].split(',')):
++                fail('Stop coder.sh in Local AI before starting another model on these GPUs.')
++            return subprocess.call([str(BACKEND), *args])
++    else:
++        os.execv(str(BACKEND), [str(BACKEND), *args])
++    return 0
++
++
++if __name__ == '__main__':
++    sys.exit(main())
