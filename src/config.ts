@@ -34,7 +34,10 @@ export const DEFAULTS: HarnessConfig = {
   maxTaskMinutes: 20,
   commandTimeoutSec: 120,
   maxRepairCycles: 2,
-  thinkingLevel: "off",
+  // Reasoning on by default: the local model is a thinking model, and turning
+  // it off measurably hurts multi-file edits. Override per repo in
+  // .harness/config.json ("thinkingLevel": "off") or live with /think.
+  thinkingLevel: "medium",
 };
 
 /**

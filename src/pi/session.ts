@@ -22,6 +22,8 @@ import type { HarnessExtension } from "../extensions/types.js";
 
 // ─── Normalized event types (our interface) ───────────────────────────────────
 
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export type NormalizedEvent =
   | { type: "agent_start" }
   | { type: "agent_end"; aborted: boolean }
@@ -71,6 +73,8 @@ export interface HarnessSession {
   compact(customInstructions?: string): Promise<{ summary: string; tokensBefore: number; estimatedTokensAfter?: number }>;
   /** Context-window usage as Pi estimates it for the next request. */
   getContextUsage(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
+  /** Change how much this model may reason before acting. */
+  setThinkingLevel(level: ThinkingLevel): void;
   /** Extension dirs/modules Pi loaded (built-ins are inline and unlisted). */
   getExtensionInfo(): { paths: string[]; diagnostics: string[] };
   /** Subscribe to normalized events. Returns unsubscribe function. */
@@ -257,6 +261,10 @@ export async function createHarnessSession(
       const usage = piSession.getContextUsage();
       if (usage && typeof usage.tokens === "number") lastKnownTokens = usage.tokens;
       return mergeContextUsage(usage, lastKnownTokens);
+    },
+
+    setThinkingLevel(level: ThinkingLevel) {
+      piSession.setThinkingLevel(level as any);
     },
 
     getExtensionInfo() {

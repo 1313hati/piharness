@@ -18,7 +18,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type HarnessConfig } from "./config.js";
-import { ensureAgentDir } from "./pi/agent-dir.js";
+import { ensureAgentDir, outputBudget } from "./pi/agent-dir.js";
 import { createHarnessSession, type HarnessSession, type NormalizedEvent } from "./pi/session.js";
 import { deriveEvidence, listEvidence, loadEvidence } from "./learn/evidence.js";
 import { loadSettings, renderSettings, setSetting, settingsPath } from "./config/settings.js";
@@ -593,6 +593,7 @@ async function runInteractive(config: HarnessConfig, plain = false): Promise<voi
       agentDir: ext.agentDir,
       toolNames: ext.toolNames,
       extensionInfo: () => session.getExtensionInfo(),
+      thinkingLevel: config.thinkingLevel,
     });
     reportLearning(config.cwd, blocks);
   } finally {
@@ -1266,6 +1267,8 @@ async function runDoctor(config: HarnessConfig): Promise<void> {
   console.log(`Max tool calls: ${config.maxToolCalls}`);
   console.log(`Max task time: ${config.maxTaskMinutes}m`);
   console.log(`Command timeout: ${config.commandTimeoutSec}s`);
+  console.log(`Reasoning: ${config.thinkingLevel} (thinkingLevel in .harness/config.json, /think in the TUI)`);
+  console.log(`Output budget: ${outputBudget()} tokens per response (PIHARNESS_MAX_OUTPUT)`);
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────

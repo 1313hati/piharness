@@ -31,7 +31,7 @@ import {
   type Component,
   VStack,
 } from "@earendil-works/pi-tui";
-import type { HarnessSession, NormalizedEvent } from "../pi/session.js";
+import type { HarnessSession, NormalizedEvent, ThinkingLevel } from "../pi/session.js";
 import {
   PREVIEW_LINES,
   type TranscriptBlock,
@@ -75,6 +75,8 @@ export interface TuiOptions {
   /** Loaded extension modules/dirs, for /extensions. */
   extensionInfo?: () => { paths: string[]; diagnostics: string[] };
   palette?: Palette;
+  /** How much the model may reason before acting (shown in /think, /stats). */
+  thinkingLevel?: ThinkingLevel;
   /** Test seam: skip the real terminal. */
   terminal?: ProcessTerminal;
 }
@@ -197,6 +199,7 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
   let lastTurnOutputTokens: number | null = null;
   let stopGpu: () => void = () => {};
   /** Duration of the last finished turn, so the footer doesn't snap back to 0.0s. */
+  let currentThinking: ThinkingLevel = options.thinkingLevel ?? "medium";
   let lastTurnMs = 0;
   /** Turn start, kept after the turn so /stats can report time to first token. */
   let lastTurnStart = Date.now();
@@ -438,7 +441,7 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
           `tools      ${stats.toolCalls} calls${options.toolNames?.length ? ` · ${options.toolNames.join(", ")}` : ""}`,
           `turn       ${formatDuration(lastTurnMs)} last`,
           `ttft       ${formatDuration(meter.ttftMs(lastTurnStart) ?? 0)} (time to first token)`,
-          `live       piharness ps from another terminal`,
+          `thinking   ${currentThinking} (change with /think)`,
           gpuInfo
             ? `gpu        ${formatGpu(gpuInfo)}${gpuInfo.tempC ? ` · ${gpuInfo.tempC}°C` : ""} (${gpuInfo.gpus} device${gpuInfo.gpus === 1 ? "" : "s"})`
             : "gpu        unavailable",
@@ -471,6 +474,21 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
         return handleTodos(input.slice("/todos".length).trim());
       case "/memory":
         return handleMemory(input.slice("/memory".length).trim());
+      case "/think": {
+        const level = input.slice("/think".length).trim() as ThinkingLevel;
+        if (!level) {
+          notice(`thinking: ${currentThinking} (usage: /think off|low|medium|high)`);
+          break;
+        }
+        if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(level)) {
+          notice(`unknown level "${level}" — use off|low|medium|high`);
+          break;
+        }
+        options.session.setThinkingLevel(level);
+        currentThinking = level;
+        notice(`thinking: ${level}${level === "off" ? " (fastest, weakest on multi-file edits)" : ""}`);
+        break;
+      }
       case "/learn": {
         const evidence = deriveEvidence(transcript.blocks, { cwd: options.cwd });
         if (!evidence) {

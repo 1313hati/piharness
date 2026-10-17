@@ -587,3 +587,56 @@ recorded as failures, and `eval score` reports both arms separately.
 
 - Add a `/watch` view (recent events only) if the transcript gets long, and
   measure ttft/time-to-first-diff across the four eval scenarios.
+
+## M14: reasoning on by default, bigger output budget (2026-10-17)
+
+**Problem the user hit**
+
+`Tool call "write" was not executed: the response hit the output token limit`
+on a large file, and "make it smarter / better coder".
+
+**Root causes**
+
+- `serializeConfig` defaulted `thinkingLevel` to `"off"`, so piharness sent
+  `enable_thinking: false` while the server ran `--reasoning on` and pi itself
+  used the model's default effort. Sessions had no reasoning at all: assistant
+  messages contained only `toolCall`/`text` parts, never `thinking`.
+- `maxTokens` for local models was 8192. A large `write` is a single response,
+  so its arguments were truncated and Pi (correctly) refused the call.
+
+**Changes**
+
+- `thinkingLevel` defaults to `medium`; `/think off|low|medium|high` changes it
+  live (`HarnessSession.setThinkingLevel`), `/stats` shows the current level,
+  and `.harness/config.json` still overrides per repo. `doctor` prints it.
+- `outputBudget()` (16384, `PIHARNESS_MAX_OUTPUT` override) is applied to local
+  models in the harness catalog by `applyOutputBudget()`, idempotent and never
+  lowering a larger user value. `doctor` prints the effective budget.
+- Standing `WORKING_RULES` in `before_agent_start`: read before edit, smallest
+  diff, run tests/build and read the output, chunk long files (write then
+  append), fix the named cause, no placeholders.
+- The upstream preamble no longer introduces the harness as pi.
+
+**Checks**
+
+- `npm test` 144 pass / 0 fail (new: budget raised, remote untouched, no
+  downgrade, env parsing; existing suite unchanged).
+- `piharness doctor`: `Model local/qwen38: ✓ (ctx=65536, max=16384)`,
+  `Reasoning: medium`, `Output budget: 16384`.
+- Real run (`local/qwen38`, 110x45, /tmp/bigwrite): one `write` of a 528-line
+  `game.js` (16.7 KB) succeeded, then `wc -l && node --check` reported
+  `528 … CHECK_OK`; session JSONL now contains `thinking` parts (385/198/204
+  chars), which never appeared with reasoning off.
+- `/think high` then `/think` in the TUI: `thinking: high`, and the second
+  command reports the current level.
+
+**Honest limits**
+
+- The 528-line write (~4.5k tokens) would also have fit the old 8192 budget, so
+  this run proves the new default works, not the old failure. The failure mode
+  returns only past ~16k output tokens per response; chunking is the rule that
+  prevents it.
+- Reasoning makes turns slower. `/think low` is the compromise; `off` restores
+  the old speed at the old quality.
+- No benchmark evidence yet that medium reasoning lifts eval pass rate: the
+  existing four scenarios are saturated (51/51 both arms).

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { defaultAgentDir, ensureAgentDir } from "../src/pi/agent-dir.js";
+import { applyOutputBudget, defaultAgentDir, ensureAgentDir, outputBudget } from "../src/pi/agent-dir.js";
 
 function scratch(): string {
   return mkdtempSync(join(tmpdir(), "piharness-agent-"));
@@ -67,5 +67,56 @@ test("defaultAgentDir: never points at the pi install, and honours the override"
   } finally {
     if (original === undefined) delete process.env.PIHARNESS_AGENT_DIR;
     else process.env.PIHARNESS_AGENT_DIR = original;
+  }
+});
+
+function catalog(maxTokens: number): string {
+  return JSON.stringify({
+    providers: {
+      local: { baseUrl: "http://127.0.0.1:8080/v1", apiKey: "local", models: [{ id: "qwen38", maxTokens }] },
+      cloud: { baseUrl: "https://api.example.com", apiKey: "sk-x", models: [{ id: "m", maxTokens: 4096 }] },
+    },
+  });
+}
+
+test("applyOutputBudget: raises local maxTokens, leaves remote models alone", () => {
+  const root = scratch();
+  try {
+    const path = join(root, "models.json");
+    writeFileSync(path, catalog(8192));
+    assert.equal(applyOutputBudget(path, 16384), true);
+    const out = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(out.providers.local.models[0].maxTokens, 16384);
+    assert.equal(out.providers.cloud.models[0].maxTokens, 4096, "remote budget untouched");
+    assert.equal(applyOutputBudget(path, 16384), false, "second call is a no-op");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("applyOutputBudget: never lowers a larger user setting", () => {
+  const root = scratch();
+  try {
+    const path = join(root, "models.json");
+    writeFileSync(path, catalog(32768));
+    assert.equal(applyOutputBudget(path, 16384), false);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).providers.local.models[0].maxTokens, 32768);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("outputBudget: env override, sane default", () => {
+  const saved = process.env.PIHARNESS_MAX_OUTPUT;
+  try {
+    delete process.env.PIHARNESS_MAX_OUTPUT;
+    assert.equal(outputBudget(), 16384);
+    process.env.PIHARNESS_MAX_OUTPUT = "24576";
+    assert.equal(outputBudget(), 24576);
+    process.env.PIHARNESS_MAX_OUTPUT = "nonsense";
+    assert.equal(outputBudget(), 16384);
+  } finally {
+    if (saved === undefined) delete process.env.PIHARNESS_MAX_OUTPUT;
+    else process.env.PIHARNESS_MAX_OUTPUT = saved;
   }
 });

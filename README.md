@@ -65,6 +65,22 @@ Tools are harness-owned objects (`src/extensions/`), registered with Pi through
 one small adapter (`src/pi/extensions.ts`). Pi extension modules dropped into
 `.harness/extensions/` or `<agentDir>/extensions/` load alongside them.
 
+## Making it a better coder
+
+- **Reasoning is on by default** (`thinkingLevel: "medium"`). The local model is
+  a thinking model; with reasoning off it edits from memory and misses
+  multi-file consequences. Change it live with `/think off|low|medium|high`,
+  or per repo in `.harness/config.json`:
+  `{"thinkingLevel": "high"}`. Higher is smarter and slower — `low` is the
+  useful middle on a 27B.
+- **Output budget is 16384 tokens per response** (raised from 8192), so a
+  several-hundred-line `write` is no longer cut off mid-argument and refused
+  with "the response hit the output token limit". Override with
+  `PIHARNESS_MAX_OUTPUT`; `piharness doctor` prints the effective value.
+- **Standing working rules** are appended to the system prompt: read before
+  editing, smallest diff, run the tests/build after changes, split long files
+  into write-then-append, fix the cause the error names, no placeholder code.
+
 ## Watching it work
 
 The TUI is meant to answer "is it alive?" without guesswork:

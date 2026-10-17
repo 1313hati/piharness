@@ -12,7 +12,7 @@
  * first copy.
  */
 
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -39,10 +39,56 @@ export interface AgentDirInfo {
  * Seeding is one-shot: once models.json exists it is never overwritten from
  * ~/.pi, so later edits by the user stick.
  */
+/**
+ * Output budget for a single model response.
+ *
+ * A `write` of a large file is one response: at the old 8192-token ceiling a
+ * 500-line file was cut off mid-argument and Pi refused the call ("the
+ * response hit the output token limit"). 16384 covers ordinary files; bigger
+ * ones should be written in chunks, which the preamble asks for.
+ */
+export function outputBudget(): number {
+  const env = Number(process.env.PIHARNESS_MAX_OUTPUT);
+  return Number.isFinite(env) && env >= 1024 ? Math.floor(env) : 16384;
+}
+
+/**
+ * Raise `maxTokens` for local models in the harness catalog. Idempotent, and
+ * only ever lowers nothing: a larger user-set value is left alone.
+ */
+export function applyOutputBudget(modelsPath: string, budget = outputBudget()): boolean {
+  let catalog: any;
+  try {
+    catalog = JSON.parse(readFileSync(modelsPath, "utf8"));
+  } catch {
+    return false;
+  }
+  const providers = catalog?.providers;
+  if (!providers || typeof providers !== "object") return false;
+  let changed = false;
+  for (const provider of Object.values<any>(providers)) {
+    const baseUrl = typeof provider?.baseUrl === "string" ? provider.baseUrl : "";
+    const isLocal = /(127\.0\.0\.1|localhost|0\.0\.0\.0)/.test(baseUrl) || provider?.apiKey === "local";
+    if (!isLocal || !Array.isArray(provider?.models)) continue;
+    for (const model of provider.models) {
+      const current = typeof model?.maxTokens === "number" ? model.maxTokens : 0;
+      if (current < budget) {
+        model.maxTokens = budget;
+        changed = true;
+      }
+    }
+  }
+  if (changed) writeFileSync(modelsPath, `${JSON.stringify(catalog, null, 2)}\n`);
+  return changed;
+}
+
 export function ensureAgentDir(dir: string = defaultAgentDir(), seedFrom?: string): AgentDirInfo {
   mkdirSync(dir, { recursive: true });
   const modelsPath = join(dir, "models.json");
-  if (existsSync(modelsPath)) return { dir, modelsPath, seeded: false };
+  if (existsSync(modelsPath)) {
+    applyOutputBudget(modelsPath);
+    return { dir, modelsPath, seeded: false };
+  }
 
   const source = seedFrom ?? join(piAgentDir(), "models.json");
   if (!existsSync(source)) {
@@ -52,5 +98,6 @@ export function ensureAgentDir(dir: string = defaultAgentDir(), seedFrom?: strin
     );
   }
   copyFileSync(source, modelsPath);
+  applyOutputBudget(modelsPath);
   return { dir, modelsPath, seeded: true };
 }

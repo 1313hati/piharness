@@ -11,6 +11,21 @@ import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { renderHarnessContext } from "../extensions/builtin.js";
 import { clampText, type HarnessExtension, type HarnessTool } from "../extensions/types.js";
 
+/**
+ * Standing engineering rules. Short on purpose: every token here is paid for
+ * on each turn, so these are the behaviours that actually change output
+ * quality on this model rather than general advice.
+ */
+const WORKING_RULES = [
+  "## Working rules",
+  "- Read a file before you edit it; never reconstruct it from memory.",
+  "- Make the smallest change that satisfies the request; keep existing behaviour.",
+  "- After changing code, run the project's test or build command and read the output before claiming success.",
+  "- For a file longer than ~150 lines, write the first part, then append the rest with edit calls. One tool call that overruns the output budget is rejected and wastes the turn.",
+  "- When a command fails, fix the cause the error names, not the symptom.",
+  "- No placeholders, no TODO stubs, no \"rest of the implementation here\".",
+].join("\n");
+
 export interface InlineExtensionDeps {
   cwd: string;
   agentDir: string;
@@ -65,8 +80,7 @@ export function harnessInlineExtensions(
               // a broken extension context must not kill the turn
             }
           }
-          const extra = blocks.filter(Boolean).join("\n\n");
-          if (!extra) return;
+          const extra = [blocks.filter(Boolean).join("\n\n"), WORKING_RULES].filter(Boolean).join("\n\n");
           // Upstream's preamble says "inside pi"; this is its own front-end.
           const base = event.systemPrompt.replace("operating inside pi,", "operating inside piharness,");
           return { systemPrompt: `${base}\n\n${extra}` };
