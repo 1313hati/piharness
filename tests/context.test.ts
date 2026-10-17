@@ -226,6 +226,16 @@ test("render: facts section with tags, skills section with body", () => {
   assert.match(block, /1\. typecheck/);
 });
 
+test("render: skill H1 is not duplicated in the injected block", () => {
+  const skills = [
+    { name: "gates", title: "Gate order", description: "run the gates", body: "# Gate order\n\n1. typecheck\n2. test\n", path: "/g" },
+  ];
+  const block = renderSelection("gate order", { version: 1, facts: [] }, skills);
+  const occurrences = block.match(/Gate order/g) ?? [];
+  assert.equal(occurrences.length, 1, `title should appear once, got: ${block}`);
+  assert.match(block, /1\. typecheck/);
+});
+
 test("buildContextBlock end-to-end in a workspace", () => {
   const ws = tmp();
   try {

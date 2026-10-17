@@ -9,6 +9,7 @@
  *   harness resume [id]        Resume an active managed task
  *   harness status [id]        Show task state (or the active task)
  *   harness memory <list|add|remove>   Manage project memory facts (M3)
+ *   harness skill <propose|list|show|evaluate|approve|reject>   Learning service (M4)
  *   harness doctor             Configuration/backend diagnostics
  */
 
@@ -28,11 +29,21 @@ import {
   removeFact,
   MemoryError,
 } from "./context/index.js";
+import {
+  listProposals,
+  loadProposal,
+  renderSkillMd,
+  proposeFromTask,
+  evaluateProposal,
+  approveProposal,
+  rejectProposal,
+  SkillError,
+} from "./skills/index.js";
 
 // ─── Argument parsing ──────────────────────────────────────────────────────────
 
 interface CliArgs {
-  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "doctor";
+  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "skill" | "doctor";
   task?: string;
   /** Positional args after the first (e.g. the fact text in memory add). */
   extras: string[];
@@ -66,6 +77,9 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case "memory":
         result.command = "memory";
+        break;
+      case "skill":
+        result.command = "skill";
         break;
       case "doctor":
         result.command = "doctor";
@@ -104,10 +118,10 @@ function parseArgs(argv: string[]): CliArgs {
           console.error(`Unknown option: ${arg}`);
           process.exit(1);
         }
-        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory")) {
-          result.task = arg; // goal for run/task; id for resume/status; subcommand for memory
-        } else if (result.task !== undefined && result.command === "memory") {
-          result.extras.push(arg); // fact text / id for memory subcommands
+        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory" || result.command === "skill")) {
+          result.task = arg; // goal for run/task; id for resume/status; subcommand for memory/skill
+        } else if (result.task !== undefined && (result.command === "memory" || result.command === "skill")) {
+          result.extras.push(arg); // subcommand's arguments (ids/names)
         } else {
           console.error(`Unexpected argument: ${arg}`);
           process.exit(1);
@@ -133,6 +147,12 @@ Usage:
   harness memory list            List project memory facts
   harness memory add "fact"      Add a memory fact (tags via --tag, --source user|verified)
   harness memory remove <id>     Remove a memory fact
+  harness skill propose <taskId> Draft a skill proposal from a completed task
+  harness skill list             List skill proposals (inert until approved)
+  harness skill show <name>      Show a proposal's SKILL.md draft
+  harness skill evaluate <name>  Run the proposal's verify commands
+  harness skill approve <name>   Promote a passed proposal into .harness/skills/
+  harness skill reject <name>    Reject a proposal
   harness doctor                 Check configuration and backend
 
 Options:
@@ -486,6 +506,101 @@ function runMemory(config: HarnessConfig, args: CliArgs): void {
     throw e;
   }
 }
+function runSkill(config: HarnessConfig, args: CliArgs): void {
+  const sub = args.task;
+  const nameOrId = args.extras[0];
+  const ws = config.cwd;
+  try {
+    switch (sub) {
+      case "propose": {
+        if (!nameOrId) {
+          console.error("Usage: harness skill propose <taskId>");
+          process.exit(1);
+        }
+        const record = loadTask(ws, nameOrId);
+        if (!record) {
+          console.error(`No task with id ${nameOrId}`);
+          process.exit(1);
+        }
+        const p = proposeFromTask(ws, record);
+        console.log(`Proposed ${p.name} (from task ${record.id})`);
+        console.log(`  draft: .harness/state/proposals/${p.name}/proposal.json`);
+        console.log(`  next:  harness skill evaluate ${p.name} && harness skill approve ${p.name}`);
+        return;
+      }
+      case "list": {
+        const proposals = listProposals(ws);
+        if (proposals.length === 0) {
+          console.log("No skill proposals. Draft one with: harness skill propose <taskId>");
+          return;
+        }
+        for (const p of proposals) {
+          const evalInfo = p.evalResult
+            ? ` eval=${p.evalResult.passed ? "PASS" : "FAIL"}`
+            : " eval=none";
+          console.log(`${p.name}  [${p.status}]${evalInfo}  ${p.title.slice(0, 60)}`);
+        }
+        console.log(`\n${proposals.length} proposal(s) in .harness/state/proposals/ (inert until approved)`);
+        return;
+      }
+      case "show": {
+        if (!nameOrId) {
+          console.error("Usage: harness skill show <name>");
+          process.exit(1);
+        }
+        const p = loadProposal(ws, nameOrId);
+        if (!p) {
+          console.error(`No proposal named ${nameOrId}`);
+          process.exit(1);
+        }
+        console.log(renderSkillMd(p));
+        return;
+      }
+      case "evaluate": {
+        if (!nameOrId) {
+          console.error("Usage: harness skill evaluate <name>");
+          process.exit(1);
+        }
+        const { manifest, passed } = evaluateProposal(ws, nameOrId);
+        for (const c of manifest.commands) {
+          console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.command}`);
+        }
+        if (manifest.commands.length === 0) console.log("(no verify commands recorded)");
+        console.log(`\nEvaluation: ${passed ? "PASS" : "FAIL"} — manifest in .harness/state/evals/`);
+        process.exitCode = passed ? 0 : 1;
+        return;
+      }
+      case "approve": {
+        if (!nameOrId) {
+          console.error("Usage: harness skill approve <name>");
+          process.exit(1);
+        }
+        const p = approveProposal(ws, nameOrId);
+        console.log(`Approved ${p.name} → .harness/skills/${p.name}/SKILL.md`);
+        console.log("It is now discoverable by the context service.");
+        return;
+      }
+      case "reject": {
+        if (!nameOrId) {
+          console.error("Usage: harness skill reject <name>");
+          process.exit(1);
+        }
+        const p = rejectProposal(ws, nameOrId);
+        console.log(`Rejected ${p.name} (kept in .harness/state/proposals/ for inspection)`);
+        return;
+      }
+      default:
+        console.error("Usage: harness skill propose <taskId> | list | show <name> | evaluate <name> | approve <name> | reject <name>");
+        process.exit(1);
+    }
+  } catch (e) {
+    if (e instanceof SkillError) {
+      console.error(e.message);
+      process.exit(1);
+    }
+    throw e;
+  }
+}
 
 async function runDoctor(config: HarnessConfig): Promise<void> {
   console.log("piharness doctor\n");
@@ -595,6 +710,9 @@ async function main(): Promise<void> {
     }
     case "memory":
       runMemory(config, args);
+      break;
+    case "skill":
+      runSkill(config, args);
       break;
     case "doctor":
       await runDoctor(config);

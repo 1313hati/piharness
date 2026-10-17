@@ -46,7 +46,10 @@ export function renderSelection(
   }
   if (sel.skills.length > 0) {
     const blocks = sel.skills.map(({ skill }) => {
-      return `### ${skill.name}: ${skill.title}\n${skill.body.trim()}`;
+      // The H1 is already rendered as the block heading; drop it from the body
+      // so the model does not read the title twice.
+      const body = skill.body.replace(/^\s*#\s+.+\n+/, "").trim();
+      return `### ${skill.name}: ${skill.title}\n${body}`;
     });
     parts.push(`Relevant skills (from .harness/skills/ — follow them where applicable):\n${blocks.join("\n\n")}`);
   }

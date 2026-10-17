@@ -35,7 +35,7 @@ function git(workspace: string, args: string[]): string | null {
       encoding: "utf-8",
       timeout: 10_000,
       stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    }).replace(/[ \t\r\n]+$/, "");
   } catch {
     return null;
   }
@@ -52,7 +52,14 @@ export function dirtyPaths(workspace: string): string[] {
   return out
     .split("\n")
     .filter((l) => l.length > 0)
-    .map((l) => l.slice(3).trim());
+    .map((l) => {
+      // Porcelain v1 lines are "XY PATH". The index-status char (X) is a real
+      // space for unstaged changes, so the path always starts at offset 3 — but
+      // only if that leading space survived. Tolerate a dropped leading space by
+      // normalizing, then strip the 2-char status prefix.
+      const s = l.startsWith(" ") ? l.slice(1) : l;
+      return s.slice(2).trim();
+    });
 }
 
 // ─── Workspace reconciliation ──────────────────────────────────────────────────

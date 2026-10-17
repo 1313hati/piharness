@@ -6,10 +6,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runTask } from "../src/task/controller.ts";
+import { runTask, dirtyPaths } from "../src/task/controller.ts";
 import type { TaskCheck, TaskLimits } from "../src/task/types.ts";
 import type { HarnessSession, NormalizedEvent } from "../src/pi/session.ts";
 
@@ -118,6 +119,32 @@ test("repair budget exhausted → failed with budget note", async () => {
     assert.equal(result.record.phase, "failed");
     assert.ok(result.record.outcome?.includes("repair cycles"));
     assert.equal(result.record.budgets.repairCyclesUsed, LIMITS.maxRepairCycles);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dirtyPaths preserves the leading index-status space (no path truncation)", () => {
+  const dir = tmp();
+  try {
+    const git = (args: string) =>
+      execSync(`git ${args}`, {
+        cwd: dir,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    git("init -q");
+    git("config user.email t@t.t");
+    git("config user.name t");
+    writeFileSync(join(dir, "a.txt"), "v1\n");
+    git("add a.txt");
+    git("commit -qm init");
+    // Make the only file dirty (unstaged) so the first porcelain line is
+    // " M a.txt". A .trim() of the whole output would eat that leading space
+    // and truncate the path to ".txt".
+    appendFileSync(join(dir, "a.txt"), "v2\n");
+    const paths = dirtyPaths(dir);
+    assert.deepEqual(paths, ["a.txt"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

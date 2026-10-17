@@ -88,6 +88,44 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 **Next action**
 - M4: learning service (`src/skills/`) — propose new skills from completed tasks, store under `.harness/state/proposals/`, approve into `.harness/skills/`.
 
+## M4: learning service — propose → evaluate → promote — CODE COMPLETE (2026-10-17)
+
+**Implemented behavior**
+- `src/skills/types.ts`: `SkillProposal` schema v1 (name, title, description, body, sourceTaskId, verifyCommands, status proposed/approved/rejected, evalResult, timestamps), `SkillError`.
+- `src/skills/proposals.ts`: deterministic, LLM-free drafting from a `TaskRecord` (`proposeFromTask`) — only `phase: completed` tasks qualify (learning from a failed run would encode the wrong procedure). Draft captures Goal / What worked (changed paths) / Verify (check commands), slug derived from the goal with `-2…-9` dedupe against existing proposals and approved skills, name validated (`^[\w-]{1,64}$`, so no path traversal). `renderSkillMd` emits the same `# title` + prose-line shape the M3 parser expects. Proposals live in `.harness/state/proposals/<name>/proposal.json`, which `src/context/skills.ts` never reads.
+- `src/skills/evaluate.ts`: `evaluateProposal` runs the proposal's verify commands in the workspace in order, stops at first failure, writes an immutable manifest to `.harness/state/evals/<name>-<ts>.json` and stamps `evalResult` on the proposal. A proposal with no verify commands can never pass.
+- `src/skills/promote.ts`: `approveProposal` requires `status: proposed` **and** `evalResult.passed` (evaluation → promotion gate); writes `.harness/skills/<name>/SKILL.md`, snapshotting any previous content with a sha256 into `.harness/state/skill-versions/<name>/`. `rejectProposal` keeps the record (never active). Re-approving or approving a rejected proposal is an error.
+- `src/cli.ts`: `harness skill propose <taskId> | list | show <name> | evaluate <name> | approve <name> | reject <name>`; evaluate sets exit code 1 when the commands fail; `SkillError` → message + exit 1.
+- Bug found and fixed during this slice: `parseArgs` was missing a `break` after `case "memory":` (plus a duplicated `break`), so `harness memory …` fell through and ran the `skill` command. Fixed in `src/cli.ts`; verified by running `memory add` / `memory list` through the built CLI.
+- Bug found and fixed in M3's renderer while checking promoted-skill injection: the skill body was injected with its own `# Title` heading *and* the `### name: title` block heading, so the model read the title twice. `renderSelection` now strips the leading H1; covered by a new test.
+- Housekeeping: repo files had drifted to mode 755 (now 644); `npm install` re-linked `node_modules/.bin` (tsc/tsx were missing, so the gates could not run).
+
+**Commands/checks and outcomes**
+- `npm run typecheck` → clean; `npm run build` → clean.
+- `npm test` → 63/63 pass (config 5, events 14, task-store 10, controller 5, context 15, skills 14). `tests/skills.test.ts` covers: draft from completed task, rejection of non-completed tasks, slug dedupe, path-traversal name rejection, proposal persistence round-trip, corrupt-file tolerance, list/show, evaluate pass, evaluate fail (stop at first failure) + manifest content, no-commands → cannot pass, approve-without-eval rejection, approve writes SKILL.md + version snapshot on overwrite, reject transitions, re-approve/re-reject errors, approved proposal discoverable by context service while unapproved ones are not.
+- CLI chain end-to-end in a scratch workspace (`/home/hati/.hermes/cache/scratch/m4e2e`, git repo with `src/sum.ts` + `check.mjs`), seeded with a **synthetic** completed task record (see blocker):
+  ```
+  node dist/cli.js skill propose task-e2e-m4 --cwd "$WS"
+    → Proposed fix-off-by-one-in-sum-n-so-it-returns-1-n
+  node dist/cli.js skill approve <name>            → "has not passed evaluation" (exit 1) ✓ gate holds
+  node dist/cli.js skill evaluate <name>
+    → PASS  node check.mjs / Evaluation: PASS (exit 0)
+  node dist/cli.js skill list                       → [proposed] eval=PASS
+  node dist/cli.js skill approve <name>             → approved, SKILL.md written
+  node dist/cli.js skill approve <name> (again)     → "already approved" (exit 1) ✓
+  ```
+  `.harness/` afterwards: `skills/<name>/SKILL.md`, `state/proposals/<name>/proposal.json`, `state/evals/<name>-<ts>.json`, `state/tasks/task-e2e-m4.json`. `buildContextBlock(ws, "off-by-one sum(n) returns wrong total")` returns the promoted skill (title once, verify command present) — the learning loop closes from draft to injection.
+
+**Known limitation / blocker**
+- **Real-model smoke test not run: the local endpoint is down.** `curl http://127.0.0.1:8080/v1/models` → no response (`doctor` prints `Local endpoint http://127.0.0.1:8080: ✗ not reachable`); no `llama-server` binary, no Ollama, no GGUF weights on this machine right now. Per AGENTS.md the M4 integration milestone therefore is **not** claimed complete: the chain above was driven by a synthetic `completed` task record, not by a model-authored task. Everything model-independent is proven.
+- Drafts are templated from the task record; there is no model-written reflection step, so a promoted skill is a verified procedure summary, not a distilled insight.
+- Promotion gate only re-runs the recorded verify commands in the *current* workspace — a skill learned in a repo where those commands no longer apply can pass evaluation vacuously on a trivially succeeding command. `harness skill evaluate` has no timeout override (120s hard-coded).
+- `skill evaluate` runs on the live workspace (no scratch copy), so a side-effecting verify command mutates the tree being evaluated.
+
+**Next action**
+- Bring the local endpoint up (`llama-server … --port 8080`), then run the real chain: `task … --check "…|npm test"` → `skill propose <taskId>` → `evaluate` → `approve` → second task that cites the injected skill. Record it here and flip this milestone to DONE.
+- Then M5: evaluation harness — a repeatable scenario runner over `evals/` (copy fixture → run managed task → record pass/fail + budgets into `.harness/state/evals/`), so learning gains can be measured instead of asserted.
+
 ## M1 evidence (2026-10-17)
 
 **Implemented behavior**
