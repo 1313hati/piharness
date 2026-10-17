@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "name": "broken-export",
+  "description": "Repair a broken re-export and a sign-formatting bug in a small formatting package, proven by its own test.",
+  "fixture": "../fixtures/broken-import",
+  "goal": "This package fails to import: tests/format.test.ts cannot get 'formatCurrency' from src/index.ts. Make 'npm test' pass. The tests define the expected behaviour, including how negative amounts must be formatted. Change only files under src/.",
+  "checks": [
+    {
+      "description": "format tests pass",
+      "command": "npm test"
+    }
+  ],
+  "limits": {
+    "maxToolCalls": 24,
+    "maxTaskMinutes": 10
+  }
+}

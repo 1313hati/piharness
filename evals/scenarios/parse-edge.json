@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "name": "parse-edge",
+  "description": "Fix two edge cases in a comma-separated list parser (empty input, empty segments) with the fixture's test as the contract.",
+  "fixture": "../fixtures/parse-edge",
+  "goal": "src/parse.ts parseList() mishandles empty input and empty segments. Make 'npm test' pass without weakening the tests: empty or whitespace-only input must return no items, and empty segments between commas must be dropped. Change only files under src/.",
+  "checks": [
+    {
+      "description": "parse tests pass",
+      "command": "npm test"
+    }
+  ],
+  "limits": {
+    "maxToolCalls": 24,
+    "maxTaskMinutes": 10
+  }
+}
