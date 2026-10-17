@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.harness/
+*.log
+.DS_Store
