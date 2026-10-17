@@ -9,7 +9,7 @@ import { selectContext, type ContextSelection, type SelectionBudgets } from "./s
 
 export { loadMemory, saveMemory, addFact, removeFact, MemoryError } from "./memory.js";
 export type { Memory, MemoryFact } from "./memory.js";
-export { listSkills } from "./skills.js";
+export { listSkills, globalSkillsRoot } from "./skills.js";
 export type { SkillSummary } from "./skills.js";
 export { selectContext, estimateTokens, goalTokens } from "./selection.js";
 export type { ContextSelection, SelectionBudgets } from "./selection.js";

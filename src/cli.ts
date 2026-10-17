@@ -40,6 +40,8 @@ import { findActiveTask, listTaskIds, loadTask, saveTask } from "./task/store.js
 import type { TaskCheck, TaskLimits } from "./task/types.js";
 import {
   buildContextBlock,
+  globalSkillsRoot,
+  listSkills,
   loadMemory,
   addFact,
   removeFact,
@@ -1152,18 +1154,30 @@ function runSkill(config: HarnessConfig, args: CliArgs): void {
         return;
       }
       case "list": {
+        // What is installed and usable now, before the proposals (which are
+        // inert until approved) — the two are different questions.
+        const installed = listSkills(ws);
+        const global = globalSkillsRoot();
+        if (installed.length === 0) {
+          console.log("No approved skills in .harness/skills/ or " + global + "/");
+        } else {
+          for (const s of installed) {
+            const where = `[${s.path.startsWith(global) ? "global" : "project"}]`.padEnd(10);
+            const desc = s.description.length > 70 ? `${s.description.slice(0, 69)}…` : s.description;
+            console.log(`${s.name}  ${where} ${desc}`);
+          }
+        }
         const proposals = listProposals(ws);
-        if (proposals.length === 0) {
-          console.log("No skill proposals. Draft one with: harness skill propose <taskId>");
-          return;
+        if (proposals.length > 0) {
+          console.log("");
+          for (const p of proposals) {
+            const evalInfo = p.evalResult
+              ? ` eval=${p.evalResult.passed ? "PASS" : "FAIL"}`
+              : " eval=none";
+            console.log(`${p.name}  [${p.status}]${evalInfo}  ${p.title.slice(0, 60)}`);
+          }
+          console.log(`\n${proposals.length} proposal(s) in .harness/state/proposals/ (inert until approved)`);
         }
-        for (const p of proposals) {
-          const evalInfo = p.evalResult
-            ? ` eval=${p.evalResult.passed ? "PASS" : "FAIL"}`
-            : " eval=none";
-          console.log(`${p.name}  [${p.status}]${evalInfo}  ${p.title.slice(0, 60)}`);
-        }
-        console.log(`\n${proposals.length} proposal(s) in .harness/state/proposals/ (inert until approved)`);
         return;
       }
       case "show": {
@@ -1172,11 +1186,17 @@ function runSkill(config: HarnessConfig, args: CliArgs): void {
           process.exit(1);
         }
         const p = loadProposal(ws, nameOrId);
-        if (!p) {
-          console.error(`No proposal named ${nameOrId}`);
+        if (p) {
+          console.log(renderSkillMd(p));
+          return;
+        }
+        const approved = listSkills(ws).find((s) => s.name === nameOrId);
+        if (!approved) {
+          console.error(`No skill named ${nameOrId} (see: harness skill list)`);
           process.exit(1);
         }
-        console.log(renderSkillMd(p));
+        console.log(`File: ${approved.path}\n`);
+        console.log(readFileSync(approved.path, "utf-8"));
         return;
       }
       case "evaluate": {
@@ -1213,7 +1233,7 @@ function runSkill(config: HarnessConfig, args: CliArgs): void {
         return;
       }
       default:
-        console.error("Usage: harness skill propose <taskId> | list | show <name> | evaluate <name> | approve <name> | reject <name>");
+        console.error("Usage: harness skill list | show <name> | propose <taskId> | evaluate <name> | approve <name> | reject <name>");
         process.exit(1);
     }
   } catch (e) {
