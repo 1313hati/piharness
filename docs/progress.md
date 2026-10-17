@@ -534,3 +534,56 @@ recorded as failures, and `eval score` reports both arms separately.
 
 - Hard eval set where the baseline sometimes fails; then compare three arms
   (no skills, hand-written skill, auto-promoted skill).
+
+## M13: observable runtime, settings, live tool output (2026-10-17)
+
+**Implemented behavior**
+
+- Footer now answers "is it stuck?": animated spinner, `waiting for first
+  token` before any delta, `generating`, or `⚙ <tool>`; decode speed; tokens
+  streamed this turn; `idle Ns` / `stalled Ns` when events stop. Pinned
+  segments survive narrow terminals; the stall warning is dropped last.
+- Terminal title mirrors the state (`piharness · generating · 12.4 t/s`), so
+  liveness is visible even when the footer is scrolled away.
+- Tool calls are observable while they run: edits show the `- old` / `+ new`
+  diff, writes show the file head, and `tool_execution_update` (partial
+  output) is normalized to `tool_update` so bash/build output streams into the
+  block instead of appearing only at the end. Duration comes from Pi's
+  `durationMs` when present, wall-clock otherwise.
+- `piharness ps [--json|--clear]` reads `<agentDir>/live.json` (rewritten every
+  500ms, removed on exit) and reports pid/dead, uptime, phase, t/s, streamed
+  tokens, idle seconds, tool count, and a stall warning.
+- Settings: `<agentDir>/harness-settings.json` with `ui.gpu`,
+  `learn.onExit`, `learn.autoPromote`, `learn.minEvidence`; `piharness
+  settings [show|set]` and `/settings` in the TUI. Env vars still win.
+- Banner gained a version and a command hint row; tool glyphs are now
+  `◌ / ✓ / ✗`; the upstream preamble no longer introduces the harness as pi.
+
+**Checks and outcomes**
+
+- `npm run typecheck`, `npm run build`, `npm test` — 140 pass / 0 fail
+  (live-state round trip, dead pid, stale file, foreign-pid clear, corrupt
+  file, settings defaults/validation/corruption, diff preview, tool_update
+  normalization).
+- Real TUI run (`local/qwen38`, 110x45) editing `sum.js`/`sum.test.js`:
+  `◌ edit` blocks showed the actual `- export function sum…` / `+ …` diff
+  before applying it; `◌ bash cd /tmp/learn-demo && npm test` streamed
+  `both tests pass (2 pass, 0 fail)`; footer showed `⚙ bash` and tool
+  durations (`0.2s`).
+- `piharness ps` during a live turn reported `pid … · generating · 49.3 t/s ·
+  +90 tok · 3886 tokens · /tmp`; after exit it reports "no live harness
+  session" (file removed, no stale state).
+
+**Notes**
+
+- The user reported a session that felt slow and invisible. Part of that was
+  self-inflicted: eval/test runs were sharing the single llama-server while
+  the session was in use. Do not run model sessions in parallel with the
+  user's work.
+- Pi's own system message measured 44.8KB vs piharness 13.6KB in the same
+  project, so the harness is not paying a prompt-size penalty.
+
+**Next action**
+
+- Add a `/watch` view (recent events only) if the transcript gets long, and
+  measure ttft/time-to-first-diff across the four eval scenarios.

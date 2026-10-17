@@ -89,6 +89,25 @@ test("tool_execution_start is normalized to tool_start", () => {
   });
 });
 
+test("tool_execution_update is normalized to tool_update", () => {
+  const out = normalizeEvent(
+    ev({
+      type: "tool_execution_update",
+      toolCallId: "tc9",
+      toolName: "bash",
+      partialResult: "building…\n",
+    }),
+  );
+  assert.deepEqual(out, { type: "tool_update", toolName: "bash", toolCallId: "tc9", partial: "building…\n" });
+});
+
+test("tool_execution_end carries durationMs when measured", () => {
+  const out = normalizeEvent(
+    ev({ type: "tool_execution_end", toolCallId: "tc1", toolName: "bash", result: "ok", durationMs: 1234 }),
+  );
+  assert.equal((out as { durationMs?: number }).durationMs, 1234);
+});
+
 test("tool_execution_end is normalized to tool_end with isError default false", () => {
   const out = normalizeEvent(
     ev({

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { summarizeArgs, summarizeResult } from "../src/ui/app.js";
+import { previewFromArgs, summarizeArgs, summarizeResult } from "../src/ui/app.js";
 import {
   renderBanner,
   renderStatus,
@@ -120,12 +120,20 @@ test("banner: orange wordmark, model on the right, full width", () => {
     80,
     P,
   );
-  assert.equal(lines.length, 2);
+  assert.equal(lines.length, 3); // wordmark, path, hint row
   for (const line of lines) assert.equal(visibleWidth(line), 80);
   assert.ok(lines[0].includes("PIHARNESS"));
   assert.ok(lines[0].includes("\x1b[48;2;255;138;31m"), "wordmark is an orange block");
   assert.ok(lines[0].includes("local/qwen38"));
   assert.ok(lines[1].includes("/work"));
+});
+
+test("preview shows the diff a tool is about to apply", () => {
+  const edit = previewFromArgs("edit", { path: "src/sum.ts", edits: [{ oldText: "a - b", newText: "a + b" }] });
+  assert.deepEqual(edit, ["- a - b", "+ a + b"]);
+  const write = previewFromArgs("write", { path: "x.ts", content: "line one\nline two" });
+  assert.deepEqual(write, ["+ line one", "+ line two"]);
+  assert.deepEqual(previewFromArgs("bash", { command: "npm test" }), []);
 });
 
 test("status: left state, right hint, exact width", () => {

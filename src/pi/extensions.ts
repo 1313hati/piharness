@@ -67,7 +67,9 @@ export function harnessInlineExtensions(
           }
           const extra = blocks.filter(Boolean).join("\n\n");
           if (!extra) return;
-          return { systemPrompt: `${event.systemPrompt}\n\n${extra}` };
+          // Upstream's preamble says "inside pi"; this is its own front-end.
+          const base = event.systemPrompt.replace("operating inside pi,", "operating inside piharness,");
+          return { systemPrompt: `${base}\n\n${extra}` };
         });
       },
     },

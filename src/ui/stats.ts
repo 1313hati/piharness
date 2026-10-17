@@ -53,6 +53,21 @@ export class StreamMeter {
    * models, which made wall-clock math report absurdly low numbers for short
    * answers. `finish()` is only the fallback when no stream arrived.
    */
+  /** Tokens streamed so far this turn (estimate; 4 chars ≈ 1 token). */
+  tokens(): number {
+    return this.chars / 4;
+  }
+
+  /** Milliseconds from turn start to the first streamed token, if seen. */
+  ttftMs(startedAt: number): number | null {
+    return this.firstAt === null ? null : Math.max(0, this.firstAt - startedAt);
+  }
+
+  /** When the last delta arrived, or null if nothing streamed yet. */
+  lastActivityAt(): number | null {
+    return this.lastAt;
+  }
+
   rate(now = Date.now()): number | null {
     if (this.firstAt !== null && this.lastAt !== null) {
       const spanMs = Math.max(this.lastAt - this.firstAt, 250);
@@ -92,6 +107,22 @@ export function formatDuration(ms: number): string {
 }
 
 /** "12.3 t/s", or "" when there is no rate yet. */
+/** Streamed tokens this turn, compact: 0 "", 412 "412", 2400 "2.4k". */
+export function formatStreamTokens(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens <= 0) return "";
+  return tokens >= 1000 ? `+${(tokens / 1000).toFixed(1)}k tok` : `+${Math.round(tokens)} tok`;
+}
+
+/**
+ * How long since the last event. Silence is the only honest signal that a
+ * turn is stuck, so it is shown as soon as it starts to feel long.
+ */
+export function formatIdle(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (!Number.isFinite(s) || s < 4) return "";
+  return s >= 20 ? `stalled ${s}s` : `idle ${s}s`;
+}
+
 export function formatRate(rate: number | null): string {
   if (rate === null || !Number.isFinite(rate) || rate <= 0) return "";
   return `${rate < 10 ? rate.toFixed(1) : Math.round(rate)} t/s`;

@@ -65,6 +65,29 @@ Tools are harness-owned objects (`src/extensions/`), registered with Pi through
 one small adapter (`src/pi/extensions.ts`). Pi extension modules dropped into
 `.harness/extensions/` or `<agentDir>/extensions/` load alongside them.
 
+## Watching it work
+
+The TUI is meant to answer "is it alive?" without guesswork:
+
+- the footer ticks every half second and always shows what is happening —
+  `waiting for first token`, `generating`, or `⚙ bash` — plus decode speed,
+  tokens streamed this turn, and an idle/stalled counter when nothing arrives
+- streaming text and reasoning appear as they are produced; thinking is dimmed
+- a tool call shows its diff (`- old` / `+ new`) while it runs, and bash/tool
+  output fills in live instead of appearing only at the end
+- the terminal title mirrors the state (`piharness · generating · 12.4 t/s`)
+
+From another terminal:
+
+```
+piharness ps            # pid, uptime, phase, t/s, tokens, "no events 31s"
+watch -n1 piharness ps  # same, refreshed
+piharness ps --json     # machine-readable
+```
+
+`ps` reads `<agentDir>/live.json`, which the TUI rewrites twice a second and
+removes on exit; a stale pid is reported as stale, not hidden.
+
 ## Learning from your sessions
 
 After a session that changed files and finished with a passing gate

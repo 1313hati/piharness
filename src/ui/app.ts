@@ -21,6 +21,7 @@
  * terminal, the session wiring, and the key bindings.
  */
 
+import { readFileSync } from "node:fs";
 import {
   Editor,
   type EditorTheme,
@@ -32,6 +33,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { HarnessSession, NormalizedEvent } from "../pi/session.js";
 import {
+  PREVIEW_LINES,
   type TranscriptBlock,
   type ToolBlock,
   renderBanner,
@@ -46,13 +48,18 @@ import {
   formatContext,
   formatDuration,
   formatGpu,
+  formatIdle,
   formatRate,
+  formatStreamTokens,
   formatTokens,
 } from "./stats.js";
 import { startGpuSampler } from "./gpu.js";
+import { clearLiveState, writeLiveState } from "./live.js";
+import { defaultAgentDir } from "../pi/agent-dir.js";
 import { addTodo, completeTodo, loadTodos, removeTodo, renderTodos } from "../extensions/todo.js";
 import { deriveEvidence } from "../learn/evidence.js";
 import { DEFAULT_MIN_EVIDENCE, learnFromSession } from "../learn/mine.js";
+import { loadSettings, renderSettings, settingsPath } from "../config/settings.js";
 import { addFact, globalMemoryPath, loadMemoryFile, memoryPath, renderFacts } from "../context/memory.js";
 
 export interface TuiOptions {
@@ -101,6 +108,10 @@ class StatusLine implements Component {
       rate?: string;
       context?: string;
       gpu?: string;
+      activity?: string;
+      stream?: string;
+      idle?: string;
+      spinner?: string;
     },
   ) {}
   set(info: Partial<typeof this.info>): void {
@@ -113,6 +124,14 @@ class StatusLine implements Component {
 }
 
 const HINT = "/help  /quit";
+/** Single source for the banner and --version. */
+const VERSION = (() => {
+  try {
+    return (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version?: string }).version;
+  } catch {
+    return undefined;
+  }
+})();
 
 /**
  * The TUI hands Ctrl+C to the focused component, not to input listeners, so
@@ -169,6 +188,8 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
 
   let turn: TurnState | null = null;
   let toolBlocks = new Map<string, ToolBlock>();
+  /** Start time per tool call, for the duration shown when it finishes. */
+  let toolStarted = new Map<string, number>();
   let lastCtrlC = 0;
   let closed = false;
   const meter = new StreamMeter();
@@ -177,6 +198,13 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
   let stopGpu: () => void = () => {};
   /** Duration of the last finished turn, so the footer doesn't snap back to 0.0s. */
   let lastTurnMs = 0;
+  /** Turn start, kept after the turn so /stats can report time to first token. */
+  let lastTurnStart = Date.now();
+  /** Last time anything happened: a stream delta or a tool event. */
+  let lastEventAt = Date.now();
+  /** Tool currently executing, if any. */
+  let currentTool: string | null = null;
+  const startedAt = new Date().toISOString();
 
   const contextInfo = (): ContextInfo | null => {
     try {
@@ -198,6 +226,16 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
       rate: formatRate(meter.rate()),
       context: formatContext(contextInfo()),
       gpu: formatGpu(gpuInfo),
+      activity: turn && !turn.finalised
+        ? currentTool
+          ? `⚙ ${currentTool}`
+          : meter.tokens() > 0
+            ? "generating"
+            : "waiting for first token"
+        : "",
+      stream: turn && !turn.finalised ? formatStreamTokens(meter.tokens()) : "",
+      idle: turn && !turn.finalised ? formatIdle(Date.now() - lastEventAt) : "",
+      spinner: "◐◓◑◒"[Math.floor(Date.now() / 250) % 4],
     });
     transcript.invalidate();
     tui.requestRender();
@@ -210,7 +248,9 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
 
   const beginTurn = () => {
     turn = { startedAt: Date.now(), assistantIndex: null, thinkingIndex: null, finalised: false };
+    lastTurnStart = turn.startedAt;
     toolBlocks = new Map();
+    toolStarted = new Map();
     meter.reset();
     const stats = options.session.getSessionStats();
     lastTurnOutputTokens = stats.tokens.output;
@@ -253,6 +293,7 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
   };
 
   const onEvent = (event: NormalizedEvent) => {
+    lastEventAt = Date.now();
     switch (event.type) {
       case "agent_start":
         beginTurn();
@@ -291,10 +332,26 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
           status: "running",
           output: [],
           truncated: false,
+          preview: previewFromArgs(event.toolName, event.args),
         };
         toolBlocks.set(event.toolCallId, block);
+        toolStarted.set(event.toolCallId, Date.now());
+        currentTool = event.toolName;
         push(block);
         refreshStatus();
+        break;
+      }
+      // Partial tool output (bash streaming): the block fills in while it runs,
+      // so a long build looks alive instead of silent.
+      case "tool_update": {
+        const block = toolBlocks.get(event.toolCallId);
+        if (!block) break;
+        const { lines, truncated } = summarizeResult(event.partial);
+        if (lines.length > 0) {
+          block.output = lines;
+          block.truncated = truncated;
+          refreshStatus();
+        }
         break;
       }
       case "tool_end": {
@@ -304,6 +361,9 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
         block.status = event.isError ? "error" : "ok";
         block.output = lines;
         block.truncated = truncated;
+        const started = toolStarted.get(event.toolCallId);
+        block.ms = typeof event.durationMs === "number" ? event.durationMs : started ? Date.now() - started : undefined;
+        currentTool = null;
         refreshStatus();
         break;
       }
@@ -334,6 +394,8 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
     closed = true;
     clearInterval(ticker);
     stopGpu();
+    clearLiveState(options.agentDir ?? defaultAgentDir(), process.pid);
+    setTitle("piharness");
     unsub();
     tui.stop();
     resolveClosed();
@@ -353,7 +415,7 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
         return;
       case "/help":
         notice(
-          "/help  /status  /stats  /compact [notes]  /todos  /memory  /learn  /extensions  /clear  /model  /quit\n" +
+          "/help  /status  /stats  /compact [notes]  /todos  /memory  /learn  /settings  /extensions  /clear  /model  /quit\n" +
             "Enter sends · Ctrl+C cancels a running task · /todos add <text> · /memory add <fact>",
         );
         return;
@@ -375,6 +437,8 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
           `tokens     ${stats.tokens.total} total (${stats.tokens.input} in / ${stats.tokens.output} out)`,
           `tools      ${stats.toolCalls} calls${options.toolNames?.length ? ` · ${options.toolNames.join(", ")}` : ""}`,
           `turn       ${formatDuration(lastTurnMs)} last`,
+          `ttft       ${formatDuration(meter.ttftMs(lastTurnStart) ?? 0)} (time to first token)`,
+          `live       piharness ps from another terminal`,
           gpuInfo
             ? `gpu        ${formatGpu(gpuInfo)}${gpuInfo.tempC ? ` · ${gpuInfo.tempC}°C` : ""} (${gpuInfo.gpus} device${gpuInfo.gpus === 1 ? "" : "s"})`
             : "gpu        unavailable",
@@ -414,8 +478,10 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
           break;
         }
         const result = learnFromSession(options.cwd, evidence, {
-          autoPromote: process.env.PIHARNESS_AUTO_PROMOTE !== "0",
-          minEvidence: Number(process.env.PIHARNESS_MIN_EVIDENCE ?? DEFAULT_MIN_EVIDENCE),
+          autoPromote: process.env.PIHARNESS_AUTO_PROMOTE !== undefined
+            ? process.env.PIHARNESS_AUTO_PROMOTE !== "0"
+            : settings.learn.autoPromote,
+          minEvidence: Number(process.env.PIHARNESS_MIN_EVIDENCE ?? settings.learn.minEvidence ?? DEFAULT_MIN_EVIDENCE),
         });
         notice(
           result.action === "none"
@@ -423,6 +489,11 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
             : `${result.action}: ${result.name} — ${result.reason}`,
           result.action === "promoted" ? "ok" : "info",
         );
+        break;
+      }
+      case "/settings": {
+        const file = settingsPath(options.agentDir ?? defaultAgentDir());
+        notice(renderSettings(loadSettings(options.agentDir ?? defaultAgentDir()), file).join("\n"));
         break;
       }
       case "/extensions": {
@@ -545,8 +616,10 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
     notice("press Ctrl+C again to quit, or type /quit");
   };
 
+  const settings = loadSettings(options.agentDir ?? defaultAgentDir());
+
   // Keep the elapsed clock and the GPU meter moving.
-  stopGpu = startGpuSampler({
+  if (settings.ui.gpu) stopGpu = startGpuSampler({
     onSample: (gpu) => {
       gpuInfo = gpu;
       // Only redraw for telemetry while idle; during a turn the stream already
@@ -555,14 +628,49 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
     },
   });
 
+  // Heartbeat: refresh the footer while working (so a slow model never looks
+  // frozen) and publish the live state file for `piharness ps`.
+  const setTitle = (text: string) => {
+    if (!process.stdout.isTTY) return;
+    try {
+      process.stdout.write(`\x1b]0;${text}\x07`);
+    } catch {
+      // a title is a nicety, never a failure
+    }
+  };
+
   const ticker = setInterval(() => {
     if (turn && !turn.finalised) refreshStatus();
+    setTitle(
+      turn && !turn.finalised
+        ? `piharness · ${meter.tokens() > 0 ? "generating" : "waiting"} · ${formatRate(meter.rate()) || "…"}`
+        : `piharness · ready`,
+    );
+    const stats = options.session.getSessionStats();
+    const busy = Boolean(turn) && !turn?.finalised;
+    writeLiveState(options.agentDir ?? defaultAgentDir(), {
+      version: 1,
+      pid: process.pid,
+      sessionId: options.session.sessionId,
+      cwd: options.cwd,
+      model: `${options.provider}/${options.model}`,
+      startedAt,
+      updatedAt: new Date().toISOString(),
+      phase: busy ? (currentTool ? "tool" : "generating") : "idle",
+      tool: currentTool ?? undefined,
+      turnStartedAt: turn ? new Date(turn.startedAt).toISOString() : undefined,
+      idleMs: busy ? Date.now() - lastEventAt : 0,
+      rate: meter.rate() ?? undefined,
+      streamedTokens: meter.tokens(),
+      toolCalls: stats.toolCalls,
+      tokens: stats.tokens.total,
+    });
   }, 500);
 
   // ─── go ───────────────────────────────────────────────────────────────────
 
   const banner = renderBanner(
-    { provider: options.provider, model: options.model, cwd: options.cwd, workspace: options.workspace },
+    { provider: options.provider, model: options.model, cwd: options.cwd, workspace: options.workspace, version: VERSION },
     Math.max(20, terminal.columns),
     palette,
   );
@@ -592,6 +700,34 @@ export function summarizeArgs(args: unknown): string {
 }
 
 /** Flatten a tool result to display lines, capping the volume. */
+/**
+ * The diff (or file head) a write-ish tool is about to apply. Rendered while
+ * the call runs, which is what makes "it is coding" observable rather than a
+ * spinner that says "edit".
+ */
+export function previewFromArgs(toolName: string, args: unknown): string[] {
+  const a = (args ?? {}) as Record<string, unknown>;
+  const lines: string[] = [];
+  const pushBlock = (text: unknown, sign: "-" | "+") => {
+    if (typeof text !== "string" || !text.trim()) return;
+    for (const line of text.replace(/\r\n/g, "\n").split("\n").slice(0, PREVIEW_LINES)) {
+      lines.push(`${sign} ${line}`);
+    }
+  };
+  const name = toolName.toLowerCase();
+  if (Array.isArray(a.edits)) {
+    for (const edit of a.edits.slice(0, 2) as Array<Record<string, unknown>>) {
+      pushBlock(edit.oldText, "-");
+      pushBlock(edit.newText, "+");
+    }
+  } else if (typeof a.content === "string" && ["write", "create", "write_file", "edit_file"].includes(name)) {
+    pushBlock(a.content, "+");
+  } else if (typeof a.patch === "string") {
+    for (const line of a.patch.split("\n").slice(0, PREVIEW_LINES)) lines.push(line);
+  }
+  return lines.slice(0, PREVIEW_LINES + 2);
+}
+
 export function summarizeResult(result: unknown, maxLines = 60): { lines: string[]; truncated: boolean } {
   const text = extractText(result);
   if (!text) return { lines: [], truncated: false };

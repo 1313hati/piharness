@@ -21,6 +21,9 @@ import { loadConfig, type HarnessConfig } from "./config.js";
 import { ensureAgentDir } from "./pi/agent-dir.js";
 import { createHarnessSession, type HarnessSession, type NormalizedEvent } from "./pi/session.js";
 import { deriveEvidence, listEvidence, loadEvidence } from "./learn/evidence.js";
+import { loadSettings, renderSettings, setSetting, settingsPath } from "./config/settings.js";
+import { clearLiveState, describeLive, readLiveState } from "./ui/live.js";
+import { defaultAgentDir } from "./pi/agent-dir.js";
 import type { TranscriptBlock } from "./ui/blocks.js";
 import { DEFAULT_MIN_EVIDENCE, learnFromSession } from "./learn/mine.js";
 import { createBuiltinExtensions, type BuiltinResult } from "./extensions/builtin.js";
@@ -65,7 +68,7 @@ import {
 // ─── Argument parsing ──────────────────────────────────────────────────────────
 
 interface CliArgs {
-  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "todo" | "skill" | "eval" | "learn" | "doctor";
+  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "todo" | "skill" | "eval" | "learn" | "settings" | "ps" | "doctor";
   task?: string;
   /** Positional args after the first (e.g. the fact text in memory add). */
   extras: string[];
@@ -82,6 +85,10 @@ interface CliArgs {
   /** eval run --no-skills: baseline arm with learned skills withheld. */
   noSkills?: boolean;
   noPromote?: boolean;
+  /** ps: print machine-readable state. */
+  json?: boolean;
+  /** ps: remove a stale live state file. */
+  clear?: boolean;
   /** Evidence needed before auto-promotion (default 2). */
   minEvidence?: number;
   /** interactive: force the line REPL instead of the TUI. */
@@ -132,6 +139,12 @@ function parseArgs(argv: string[]): CliArgs {
       case "learn":
         result.command = "learn";
         break;
+      case "settings":
+        result.command = "settings";
+        break;
+      case "ps":
+        result.command = "ps";
+        break;
       case "doctor":
         result.command = "doctor";
         break;
@@ -158,6 +171,12 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case "--no-promote":
         result.noPromote = true;
+        break;
+      case "--json":
+        result.json = true;
+        break;
+      case "--clear":
+        result.clear = true;
         break;
       case "--min-evidence": {
         const v = Number(args[++i]);
@@ -193,9 +212,9 @@ function parseArgs(argv: string[]): CliArgs {
           console.error(`Unknown option: ${arg}`);
           process.exit(1);
         }
-        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory" || result.command === "todo" || result.command === "skill" || result.command === "eval" || result.command === "learn")) {
+        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory" || result.command === "todo" || result.command === "skill" || result.command === "eval" || result.command === "learn" || result.command === "settings" || result.command === "ps")) {
           result.task = arg; // goal for run/task; id for resume/status; subcommand for memory/skill/eval
-        } else if (result.task !== undefined && (result.command === "memory" || result.command === "todo" || result.command === "skill" || result.command === "eval" || result.command === "learn")) {
+        } else if (result.task !== undefined && (result.command === "memory" || result.command === "todo" || result.command === "skill" || result.command === "eval" || result.command === "learn" || result.command === "settings" || result.command === "ps")) {
           result.extras.push(arg); // subcommand's arguments (ids/names)
         } else {
           console.error(`Unexpected argument: ${arg}`);
@@ -226,6 +245,9 @@ Usage:
   piharness memory list             List project memory facts
   piharness memory add "fact"       Add a memory fact (--tag, --source user|verified)
   piharness memory remove <id>      Remove a memory fact
+  piharness ps [--json] [--clear]   Is the running session alive? What is it doing?
+  piharness settings [show]         Show user settings
+  piharness settings set <k> <v>    ui.gpu | learn.onExit | learn.autoPromote | learn.minEvidence
   piharness learn [id] [--dry-run]  Mine stored sessions into skill proposals
   piharness learn list              What has been learned, and how much evidence
   piharness skill propose <taskId>  Draft a skill proposal from a completed task
@@ -584,13 +606,16 @@ async function runInteractive(config: HarnessConfig, plain = false): Promise<voi
  * learning step must not turn a good session into a failed one.
  */
 function reportLearning(cwd: string, blocks: TranscriptBlock[]): void {
-  if (process.env.PIHARNESS_NO_LEARN === "1") return;
+  const settings = loadSettings(defaultAgentDir());
+  if (process.env.PIHARNESS_NO_LEARN === "1" || !settings.learn.onExit) return;
   try {
     const evidence = deriveEvidence(blocks, { cwd });
     if (!evidence) return;
     const result = learnFromSession(cwd, evidence, {
-      autoPromote: process.env.PIHARNESS_AUTO_PROMOTE !== "0",
-      minEvidence: Number(process.env.PIHARNESS_MIN_EVIDENCE ?? DEFAULT_MIN_EVIDENCE),
+      autoPromote: process.env.PIHARNESS_AUTO_PROMOTE !== undefined
+        ? process.env.PIHARNESS_AUTO_PROMOTE !== "0"
+        : settings.learn.autoPromote,
+      minEvidence: Number(process.env.PIHARNESS_MIN_EVIDENCE ?? settings.learn.minEvidence ?? DEFAULT_MIN_EVIDENCE),
     });
     if (result.action === "none") return;
     const icon = result.action === "promoted" ? "★" : "◇";
@@ -901,6 +926,49 @@ async function runEval(config: HarnessConfig, args: CliArgs): Promise<void> {
  * `piharness learn` — mine stored sessions that no proposal has claimed yet.
  * `list` shows what has been learned and how much evidence stands behind it.
  */
+/** `piharness ps` — is the running session alive, and what is it doing? */
+function runPs(args: CliArgs): void {
+  const agentDir = defaultAgentDir();
+  if (args.clear) {
+    clearLiveState(agentDir);
+    console.log("cleared live state");
+    return;
+  }
+  const live = readLiveState(agentDir);
+  if (!live) {
+    console.log("no live harness session");
+    return;
+  }
+  console.log(args.json ? JSON.stringify(live.state, null, 2) : describeLive(live));
+}
+
+/** `piharness settings` — show or change user settings. */
+function runSettings(args: CliArgs): void {
+  const agentDir = defaultAgentDir();
+  const sub = args.task ?? "show";
+  if (sub === "show" || sub === "list") {
+    console.log(renderSettings(loadSettings(agentDir), settingsPath(agentDir)).join("\n"));
+    return;
+  }
+  if (sub === "set") {
+    const key = args.extras[0];
+    const value = args.extras.slice(1).join(" ").trim();
+    if (!key || !value) {
+      console.error("usage: piharness settings set <key> <value>");
+      process.exit(1);
+    }
+    const result = setSetting(agentDir, key, value);
+    if (!result.ok) {
+      console.error(result.error);
+      process.exit(1);
+    }
+    console.log(`${key} = ${value}`);
+    return;
+  }
+  console.error(`unknown settings command "${sub}" (show|set)`);
+  process.exit(1);
+}
+
 function runLearn(config: HarnessConfig, args: CliArgs): void {
   const sub = args.task;
   if (sub === "list") {
@@ -931,7 +999,9 @@ function runLearn(config: HarnessConfig, args: CliArgs): void {
     return;
   }
   const autoPromote = !args.noPromote;
-  const minEvidence = Number(args.minEvidence ?? process.env.PIHARNESS_MIN_EVIDENCE ?? 2);
+  const minEvidence = Number(
+    args.minEvidence ?? process.env.PIHARNESS_MIN_EVIDENCE ?? loadSettings(defaultAgentDir()).learn.minEvidence ?? 2,
+  );
   for (const evidence of pending) {
     const r = learnFromSession(config.cwd, evidence, { autoPromote, minEvidence, dryRun: args.dryRun });
     const goal = evidence.goals[0] ?? evidence.id;
@@ -1293,6 +1363,12 @@ async function main(): Promise<void> {
       break;
     case "learn":
       runLearn(config, args);
+      break;
+    case "settings":
+      runSettings(args);
+      break;
+    case "ps":
+      runPs(args);
       break;
     case "skill":
       runSkill(config, args);

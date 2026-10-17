@@ -28,7 +28,15 @@ export type NormalizedEvent =
   | { type: "text_delta"; text: string }
   | { type: "thinking_delta"; text: string }
   | { type: "tool_start"; toolName: string; toolCallId: string; args: unknown }
-  | { type: "tool_end"; toolName: string; toolCallId: string; result: unknown; isError: boolean }
+  | { type: "tool_update"; toolName: string; toolCallId: string; partial: unknown }
+  | {
+      type: "tool_end";
+      toolName: string;
+      toolCallId: string;
+      result: unknown;
+      isError: boolean;
+      durationMs?: number;
+    }
   | { type: "error"; message: string }
   | { type: "compaction_start" }
   | { type: "compaction_end" }
@@ -323,6 +331,16 @@ export function normalizeEvent(event: AgentSessionEvent): NormalizedEvent | null
         args: event.args,
       };
 
+    case "tool_execution_update": {
+      const e = event as any;
+      return {
+        type: "tool_update",
+        toolName: e.toolName ?? "unknown",
+        toolCallId: e.toolCallId ?? "",
+        partial: e.partialResult,
+      };
+    }
+
     case "tool_execution_end": {
       const e = event as any;
       return {
@@ -330,6 +348,7 @@ export function normalizeEvent(event: AgentSessionEvent): NormalizedEvent | null
         toolName: e.toolName ?? "unknown",
         toolCallId: e.toolCallId ?? "",
         result: e.result,
+        ...(typeof e.durationMs === "number" ? { durationMs: e.durationMs } : {}),
         isError: e.isError ?? false,
       };
     }
