@@ -10,6 +10,7 @@
  *   harness status [id]        Show task state (or the active task)
  *   harness memory <list|add|remove>   Manage project memory facts (M3)
  *   harness skill <propose|list|show|evaluate|approve|reject>   Learning service (M4)
+ *   harness eval <list|run>    Evaluation scenarios (M5)
  *   harness doctor             Configuration/backend diagnostics
  */
 
@@ -21,7 +22,7 @@ import {
   formatStatus,
 } from "./task/controller.js";
 import { findActiveTask, listTaskIds, loadTask, saveTask } from "./task/store.js";
-import type { TaskCheck } from "./task/types.js";
+import type { TaskCheck, TaskLimits } from "./task/types.js";
 import {
   buildContextBlock,
   loadMemory,
@@ -39,11 +40,18 @@ import {
   rejectProposal,
   SkillError,
 } from "./skills/index.js";
+import {
+  EvalError,
+  findScenario,
+  listScenarios,
+  runScenario,
+  type ScenarioRunner,
+} from "./eval/index.js";
 
 // ─── Argument parsing ──────────────────────────────────────────────────────────
 
 interface CliArgs {
-  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "skill" | "doctor";
+  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "skill" | "eval" | "doctor";
   task?: string;
   /** Positional args after the first (e.g. the fact text in memory add). */
   extras: string[];
@@ -53,15 +61,28 @@ interface CliArgs {
   provider?: string;
   model?: string;
   cwd?: string;
+  /** eval run --dry-run: validate scenarios without calling a model. */
+  dryRun?: boolean;
+  /** eval run --all: run every scenario. */
+  all?: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
   const args = argv.slice(2);
   const result: CliArgs = { command: "interactive", checks: [], extras: [], tags: [] };
+  const SUBCOMMAND_COMMANDS = new Set(["memory", "skill", "eval"]);
 
   let i = 0;
   while (i < args.length) {
     const arg = args[i];
+    // `eval run …` / `skill list` — the subcommand must not be re-read as a
+    // top-level command ("run" would otherwise restart task execution).
+    if (!arg.startsWith("-") && SUBCOMMAND_COMMANDS.has(result.command)) {
+      if (result.task === undefined) result.task = arg;
+      else result.extras.push(arg);
+      i += 1;
+      continue;
+    }
     switch (arg) {
       case "run":
         result.command = "run";
@@ -81,6 +102,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "skill":
         result.command = "skill";
         break;
+      case "eval":
+        result.command = "eval";
+        break;
       case "doctor":
         result.command = "doctor";
         break;
@@ -95,6 +119,12 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case "--check":
         result.checks.push(args[++i]);
+        break;
+      case "--dry-run":
+        result.dryRun = true;
+        break;
+      case "--all":
+        result.all = true;
         break;
       case "--tag":
         result.tags.push(args[++i]);
@@ -118,9 +148,9 @@ function parseArgs(argv: string[]): CliArgs {
           console.error(`Unknown option: ${arg}`);
           process.exit(1);
         }
-        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory" || result.command === "skill")) {
-          result.task = arg; // goal for run/task; id for resume/status; subcommand for memory/skill
-        } else if (result.task !== undefined && (result.command === "memory" || result.command === "skill")) {
+        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory" || result.command === "skill" || result.command === "eval")) {
+          result.task = arg; // goal for run/task; id for resume/status; subcommand for memory/skill/eval
+        } else if (result.task !== undefined && (result.command === "memory" || result.command === "skill" || result.command === "eval")) {
           result.extras.push(arg); // subcommand's arguments (ids/names)
         } else {
           console.error(`Unexpected argument: ${arg}`);
@@ -153,6 +183,10 @@ Usage:
   harness skill evaluate <name>  Run the proposal's verify commands
   harness skill approve <name>   Promote a passed proposal into .harness/skills/
   harness skill reject <name>    Reject a proposal
+  harness eval list              List evaluation scenarios (evals/scenarios/)
+  harness eval run <name>        Run one scenario into .harness/state/evals/
+  harness eval run --all         Run every scenario
+  harness eval run <name> --dry-run   Validate a scenario without calling a model
   harness doctor                 Check configuration and backend
 
 Options:
@@ -282,6 +316,43 @@ function resolveTask(config: HarnessConfig, id?: string) {
   return findActiveTask(config.cwd);
 }
 
+// ─── Managed task execution ────────────────────────────────────────────────────
+
+/** Run one prompt on a session, streaming events, and report tool calls used. */
+async function streamedRunPrompt(
+  session: HarnessSession,
+  prompt: string,
+): Promise<{ toolCalls: number }> {
+  const before = session.getSessionStats().toolCalls;
+  const unsub = session.subscribe(createStreamHandler(true));
+  try {
+    await session.prompt(prompt);
+    await session.waitForIdle();
+  } finally {
+    unsub();
+  }
+  const after = session.getSessionStats().toolCalls;
+  return { toolCalls: Math.max(0, after - before) };
+}
+
+/** Run one acceptance-check command in `workspace`; never throws. */
+function shellCheckRunner(workspace: string) {
+  return async (check: TaskCheck): Promise<{ ok: boolean; output: string }> => {
+    if (!check.command) return { ok: true, output: "no command" };
+    try {
+      const out = execFileSync("/bin/sh", ["-c", check.command], {
+        cwd: workspace,
+        timeout: 120_000,
+        maxBuffer: 1024 * 1024,
+        encoding: "utf-8",
+      });
+      return { ok: true, output: out.slice(-4000) };
+    } catch (err) {
+      return { ok: false, output: String(err).slice(-4000) };
+    }
+  };
+}
+
 async function runManagedTask(
   config: HarnessConfig,
   goal: string,
@@ -344,34 +415,9 @@ async function runManagedTask(
           model: config.model,
           thinkingLevel: config.thinkingLevel,
         }),
-      runPrompt: async (session, prompt) => {
-        const before = session.getSessionStats().toolCalls;
-        const handler = createStreamHandler(true);
-        const unsub = session.subscribe(handler);
-        try {
-          await session.prompt(prompt);
-          await session.waitForIdle();
-        } finally {
-          unsub();
-        }
-        const after = session.getSessionStats().toolCalls;
-        return { toolCalls: Math.max(0, after - before) };
-      },
+      runPrompt: async (session, prompt) => streamedRunPrompt(session, prompt),
       disposeSession: (session) => session.dispose(),
-      runCheck: async (check) => {
-        if (!check.command) return { ok: true, output: "no command" };
-        try {
-          const out = execFileSync("/bin/sh", ["-c", check.command], {
-            cwd: config.cwd,
-            timeout: 120_000,
-            maxBuffer: 1024 * 1024,
-            encoding: "utf-8",
-          });
-          return { ok: true, output: out.slice(-4000) };
-        } catch (err) {
-          return { ok: false, output: String(err).slice(-4000) };
-        }
-      },
+      runCheck: shellCheckRunner(config.cwd),
     });
 
     console.error("\n\x1b[90m─── Managed task finished ───\x1b[0m");
@@ -450,7 +496,135 @@ async function runInteractive(config: HarnessConfig): Promise<void> {
   }
 }
 
-// ─── Doctor ────────────────────────────────────────────────────────────────────
+// ─── Evaluation scenarios (M5) ─────────────────────────────────────────────────
+
+/** Real scenario runner: one managed task in the run's own workspace copy. */
+function makeScenarioRunner(config: HarnessConfig): ScenarioRunner {
+  return async ({ workspace, goal, checks, limits, model }) => {
+    let contextBlock = "";
+    try {
+      contextBlock = buildContextBlock(workspace, goal);
+    } catch (e) {
+      if (!(e instanceof MemoryError)) throw e;
+      console.error(`\x1b[31mMemory unusable (${e.message}); running without injected context.\x1b[0m`);
+    }
+    return controllerRunTask({
+      workspace,
+      goal,
+      checks,
+      limits,
+      model,
+      contextBlock: contextBlock || undefined,
+      createSession: async () =>
+        createHarnessSession({
+          cwd: workspace,
+          provider: config.provider,
+          model: config.model,
+          thinkingLevel: config.thinkingLevel,
+        }),
+      runPrompt: (session, prompt) => streamedRunPrompt(session, prompt),
+      disposeSession: (session) => session.dispose(),
+      runCheck: shellCheckRunner(workspace),
+    });
+  };
+}
+
+async function runEval(config: HarnessConfig, args: CliArgs): Promise<void> {
+  const sub = args.task;
+  const name = args.extras[0];
+  const repoRoot = config.cwd;
+  try {
+    if (sub === "list") {
+      const scenarios = listScenarios(repoRoot);
+      if (scenarios.length === 0) {
+        console.log("No scenarios in evals/scenarios/.");
+        return;
+      }
+      for (const s of scenarios) {
+        console.log(`${s.name}  ${s.description || "(no description)"}`);
+        console.log(`  fixture: ${s.fixture}`);
+        for (const c of s.checks) {
+          console.log(`  check ${c.id}: ${c.description}${c.command ? ` (verify: ${c.command})` : ""}`);
+        }
+      }
+      console.log(`\n${scenarios.length} scenario(s) in evals/scenarios/`);
+      return;
+    }
+    if (sub !== "run") {
+      console.error("Usage: harness eval list | run <name> | run --all [--dry-run]");
+      process.exit(1);
+    }
+
+    let targets;
+    if (args.all) {
+      targets = listScenarios(repoRoot);
+      if (targets.length === 0) {
+        console.error("No scenarios to run.");
+        process.exit(1);
+      }
+    } else {
+      if (!name) {
+        console.error("Usage: harness eval run <name> | run --all");
+        process.exit(1);
+      }
+      const found = findScenario(repoRoot, name);
+      if (!found) {
+        console.error(`No scenario named ${name} (see: harness eval list)`);
+        process.exit(1);
+      }
+      targets = [found];
+    }
+
+    if (args.dryRun) {
+      for (const s of targets) {
+        console.log(`dry-run ${s.name}`);
+        console.log(`  fixture: ${s.fixtureDir}`);
+        console.log(`  goal: ${s.goal}`);
+        console.log(
+          `  limits: ${JSON.stringify(s.limits)} (harness defaults: tools ${config.maxToolCalls}, ` +
+            `${config.maxTaskMinutes}m, repairs ${config.maxRepairCycles})`,
+        );
+      }
+      console.log(`\n${targets.length} scenario(s) valid; nothing executed.`);
+      return;
+    }
+
+    const runner = makeScenarioRunner(config);
+    const runs = [];
+    for (const s of targets) {
+      console.error(`\n\x1b[90m─── eval ${s.name} ───\x1b[0m`);
+      const run = await runScenario({
+        repoRoot,
+        scenario: s,
+        model: `${config.provider}/${config.model}`,
+        runner,
+        defaults: {
+          maxToolCalls: config.maxToolCalls,
+          maxTaskMinutes: config.maxTaskMinutes,
+          maxRepairCycles: config.maxRepairCycles,
+        },
+      });
+      runs.push(run);
+      const m = run.manifest;
+      console.log(
+        `${m.passed ? "PASS" : "FAIL"} ${m.scenario}  phase=${m.phase} ` +
+          `tools=${m.budgets.toolCallsUsed} repairs=${m.budgets.repairCyclesUsed} ` +
+          `${Math.round(m.durationMs / 1000)}s`,
+      );
+      if (m.outcome) console.log(`  outcome: ${m.outcome}`);
+      console.log(`  evidence: ${run.runDir}`);
+    }
+    const failed = runs.filter((r) => !r.manifest.passed);
+    console.log(`\n${runs.length - failed.length}/${runs.length} scenario(s) passed`);
+    if (failed.length > 0) process.exitCode = 1;
+  } catch (e) {
+    if (e instanceof EvalError) {
+      console.error(e.message);
+      process.exit(1);
+    }
+    throw e;
+  }
+}
 
 function runMemory(config: HarnessConfig, args: CliArgs): void {
   const sub = args.task;
@@ -602,6 +776,8 @@ function runSkill(config: HarnessConfig, args: CliArgs): void {
   }
 }
 
+// ─── Doctor ────────────────────────────────────────────────────────────────────
+
 async function runDoctor(config: HarnessConfig): Promise<void> {
   console.log("piharness doctor\n");
 
@@ -651,6 +827,18 @@ async function runDoctor(config: HarnessConfig): Promise<void> {
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Flush stdout, then exit. Needed because Pi's client can keep sockets and
+ * timers alive after a failed run (observed after connection retries), which
+ * otherwise leaves a one-shot CLI hanging.
+ */
+function shutdown(code: number): void {
+  process.exitCode = code;
+  const timer = setTimeout(() => process.exit(code), 250);
+  timer.unref();
+  process.stdout.write("", () => process.exit(code));
+}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
@@ -714,6 +902,9 @@ async function main(): Promise<void> {
     case "skill":
       runSkill(config, args);
       break;
+    case "eval":
+      await runEval(config, args);
+      break;
     case "doctor":
       await runDoctor(config);
       break;
@@ -722,6 +913,9 @@ async function main(): Promise<void> {
       await runInteractive(config);
       break;
   }
+  // The Pi client keeps sockets/timers alive after a failed run; a one-shot
+  // CLI must still terminate (observed after connection retries).
+  shutdown(Number(process.exitCode ?? 0));
 }
 
 main().catch((err) => {

@@ -123,8 +123,44 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 - `skill evaluate` runs on the live workspace (no scratch copy), so a side-effecting verify command mutates the tree being evaluated.
 
 **Next action**
-- Bring the local endpoint up (`llama-server … --port 8080`), then run the real chain: `task … --check "…|npm test"` → `skill propose <taskId>` → `evaluate` → `approve` → second task that cites the injected skill. Record it here and flip this milestone to DONE.
-- Then M5: evaluation harness — a repeatable scenario runner over `evals/` (copy fixture → run managed task → record pass/fail + budgets into `.harness/state/evals/`), so learning gains can be measured instead of asserted.
+- M5: evaluation harness — run scenarios from `evals/scenarios/` and record evidence.
+
+## M5: evaluation harness — scenario runner — CODE COMPLETE (2026-10-17)
+
+**Implemented behavior**
+- `evals/scenarios/*.json` is the scenario format: `name`, `description`, `fixture` (resolved relative to the scenario file), `goal`, `checks[]` (`description` + optional `command`), optional `limits` (`maxToolCalls`, `maxTaskMinutes`, `maxRepairCycles`). Shipped scenario: `evals/scenarios/offbyone-fix.json` over `evals/fixtures/offbyone`.
+- `src/eval/scenarios.ts`: pure loading/validation (`schemaVersion` 1, name `^[\w-]{1,64}$`, fixture must exist, checks non-empty, limits numeric with `maxRepairCycles: 0` allowed because "no repair loop" is a real setting while a 0 tool-call/time budget is not). `EvalError` carries the file and field.
+- `src/eval/runner.ts`: per run it copies the fixture into `.harness/state/evals/<scenario>-<base36>/work` (skipping `node_modules`, `.git`, `.harness`), copies the repo's `.harness/memory.json` and `.harness/skills/` in so a run exercises exactly the learned context that would be injected, and commits a git baseline so the controller can report changed paths. Task execution is an injected `ScenarioRunner`, so this module imports no Pi and is testable without a model. A manifest is written in a `finally` — a crashed or unreachable-backend run is recorded as `phase: "error"` evidence instead of vanishing. Fixture limits override harness defaults per key.
+- `src/eval/index.ts`; CLI `harness eval list`, `harness eval run <name>`, `harness eval run --all`, `--dry-run` (validates and prints the resolved plan without touching a model), exit code 1 when any scenario fails.
+- Fixes found while wiring this up:
+  - `parseArgs` re-read subcommand words as top-level commands: `eval run offbyone-fix` set `command = "run"` on the word "run" and launched a *task* named offbyone-fix instead. Subcommand commands (`memory`, `skill`, `eval`) now consume their positionals before the keyword switch.
+  - After the backend refused connections, the process hung well past `tools=0 → task finished` because Pi's client keeps sockets/timers alive. Added an explicit flush-then-exit (`shutdown`) at the end of `main`; the same run now exits with code 1 in ~29s.
+  - `runManagedTask`'s streaming prompt and shell-check closures were extracted to `streamedRunPrompt` / `shellCheckRunner` so the scenario runner reuses the exact same plumbing instead of a copy.
+
+**Commands/checks and outcomes**
+- `npm run typecheck` → clean; `npm run build` → clean.
+- `npm test` → 72/72 pass (config 5, events 14, task-store 10, controller 5, context 15, skills 14, eval 9). `tests/eval.test.ts` covers: fixture resolution, limits parsing (incl. rejected 0 tool calls), invalid definitions (bad name, missing fixture, empty goal, empty checks, wrong schemaVersion), missing scenarios dir, fixture copy with `.git`/`node_modules` exclusion and source left pristine, passing manifest (incl. on-disk equality with the returned one), failing task → `passed: false` + outcome, crashing runner recorded as `error` rather than thrown, per-key limit override, and memory/skills copied into the run workspace with `contextSkills` recorded.
+- CLI against the real scenario:
+  ```
+  node dist/cli.js eval list        → offbyone-fix, fixture ../fixtures/offbyone, check c1 (npm test)
+  node dist/cli.js eval run offbyone-fix --dry-run
+    → fixture absolute path, goal, limits {"maxToolCalls":20,"maxTaskMinutes":10}; "nothing executed"
+  node dist/cli.js eval run offbyone-fix
+    → FAIL offbyone-fix phase=failed tools=0 repairs=1 29s; 0/1 scenario(s) passed; exit 1
+      evidence: .harness/state/evals/offbyone-fix-mvcn52pf
+  ```
+  The manifest records `phase: "failed"`, both validation attempts (`c1 … — FAIL`), the outcome (`Checks failed and repair produced no new evidence`), `contextSkills: []`, and the task id; `work/` holds the isolated copy (own `.git`, copied `.harness`), and `evals/fixtures/offbyone/src/sum.ts` is unchanged.
+
+**Known limitation / blocker**
+- **No scenario has passed yet — the local endpoint is still down** (`127.0.0.1:8080` refuses connections; the run above retried 3×, then failed its checks with 0 tool calls). The harness now *measures*; there is nothing yet to measure. M5 stays CODE COMPLETE until one scenario passes against a real model.
+- Runs are sequential and each writes its own manifest: no aggregate score file or trend yet, so comparing two runs means diffing JSON by hand.
+- Fixtures must be dependency-free (their `node_modules` is not copied); a fixture that needs `npm install` cannot currently be evaluated.
+- `contextSkills` records skill names only, not the rendered context block, so a manifest shows *that* context was injected but not its exact text.
+- Whole-scenario wall-clock is unbounded (`maxTaskMinutes` governs the task inside it, not the copy/check step).
+
+**Next action**
+- Start the endpoint, run `harness eval run offbyone-fix`, confirm `PASS` and that `work/src/sum.ts` holds the fix; record the manifest here and flip M5 to DONE.
+- Then M6: scoreboard — append every manifest to a single `evals/history.jsonl` and add `harness eval score` comparing pass rate / tool calls / repair cycles across runs, which is what makes "gets better at recurring work" checkable over time.
 
 ## M1 evidence (2026-10-17)
 

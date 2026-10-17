@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "name": "offbyone-fix",
+  "description": "Fix an off-by-one loop bug in sum() and prove it with the fixture's own test.",
+  "fixture": "../fixtures/offbyone",
+  "goal": "There is an off-by-one bug in src/sum.ts: sum(n) must return 1+2+...+n (e.g. sum(3) = 6). Fix the bug in src/sum.ts only, then run 'npm test' to verify.",
+  "checks": [
+    {
+      "description": "sum tests pass",
+      "command": "npm test"
+    }
+  ],
+  "limits": {
+    "maxToolCalls": 20,
+    "maxTaskMinutes": 10
+  }
+}

@@ -39,6 +39,12 @@ npx tsx src/cli.ts skill propose <taskId>
 npx tsx src/cli.ts skill evaluate <name>
 npx tsx src/cli.ts skill approve <name>
 
+# Evaluation scenarios (evals/scenarios/) → .harness/state/evals/
+npx tsx src/cli.ts eval list
+npx tsx src/cli.ts eval run offbyone-fix
+npx tsx src/cli.ts eval run --all
+npx tsx src/cli.ts eval run offbyone-fix --dry-run   # validate only, no model
+
 # Diagnostics (node version, model resolution, local endpoint)
 npx tsx src/cli.ts doctor
 
@@ -69,12 +75,14 @@ Secrets stay in environment variables or Pi's credential storage — never in pr
 ## Layout
 
 ```
-src/cli.ts            CLI entry points (run/task/resume/status/memory/skill/doctor)
+src/cli.ts            CLI entry points (run/task/resume/status/memory/skill/eval/doctor)
 src/config.ts         Validated configuration and precedence
 src/pi/session.ts     Pi session adapter — the ONLY module importing Pi APIs
 src/task/             Task controller, state persistence, workspace lock, resume
 src/context/          Memory facts, skill discovery, relevance selection, injection
 src/skills/           Learning service: proposals, evaluation, promotion
+src/eval/             Evaluation harness: scenarios, fixture runs, manifests
+evals/                scenarios/ (what to run) and fixtures/ (what to run it on)
 docs/architecture.md  Boundaries and decisions
 docs/upstream.md      Exact Pi version and verified API assumptions
 docs/progress.md      Current milestone, evidence, next action
@@ -82,7 +90,7 @@ docs/progress.md      Current milestone, evidence, next action
 
 ## Status
 
-See [docs/progress.md](docs/progress.md). M0–M3 done; M4 (learning service) code-complete, real-model smoke test pending a reachable local endpoint.
+See [docs/progress.md](docs/progress.md). M0–M5 are code-complete with 72/72 tests and clean typecheck/build; every real-model run (M4 learning smoke, M5 scenarios) is still blocked on a reachable local endpoint.
 
 ## Trust model
 
