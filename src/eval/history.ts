@@ -31,7 +31,15 @@ export interface ScenarioSummary {
   scenario: string;
   variant: ScenarioVariant;
   runs: number;
+  /**
+   * Runs that actually reached the backend: passed, or called at least one
+   * tool. A run that neither passed nor touched a tool never got an answer
+   * from the model (recorded before the endpoint existed), and must not
+   * silently deflate the pass rate — it never had a chance to pass.
+   */
+  modelRuns: number;
   passed: number;
+  /** passed / modelRuns (or /runs when nothing reached the model). */
   passRate: number;
   /**
    * Cost statistics only over runs that actually called a tool. A run that
@@ -125,6 +133,7 @@ export function summarizeHistory(entries: HistoryEntry[]): ScenarioSummary[] {
   const summaries: ScenarioSummary[] = [];
   for (const { scenario, variant, runs } of byKey.values()) {
     const passed = runs.filter((r) => r.passed).length;
+    const modelRuns = runs.filter((r) => r.passed || r.toolCalls > 0).length;
     const worked = runs.filter((r) => r.toolCalls > 0);
     const toolCalls = worked.map((r) => r.toolCalls);
     const seconds = worked.map((r) => r.seconds);
@@ -132,8 +141,9 @@ export function summarizeHistory(entries: HistoryEntry[]): ScenarioSummary[] {
       scenario,
       variant,
       runs: runs.length,
+      modelRuns,
       passed,
-      passRate: passed / runs.length,
+      passRate: passed / (modelRuns > 0 ? modelRuns : runs.length),
       bestToolCalls: toolCalls.length > 0 ? Math.min(...toolCalls) : null,
       avgToolCalls:
         toolCalls.length > 0 ? toolCalls.reduce((a, b) => a + b, 0) / toolCalls.length : null,

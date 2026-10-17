@@ -621,8 +621,10 @@ async function runEval(config: HarnessConfig, args: CliArgs): Promise<void> {
         const num = (v: number | null, digits = 0) =>
           v === null ? "—" : digits > 0 ? v.toFixed(digits) : String(v);
         console.log(`${s.scenario} [${s.variant}]`);
+        const preModel = s.runs - s.modelRuns;
         console.log(
-          `  runs ${s.runs}  passed ${s.passed} (${Math.round(s.passRate * 100)}%)  ` +
+          `  runs ${s.runs}  passed ${s.passed} (${Math.round(s.passRate * 100)}% of ${s.modelRuns} that reached the model` +
+            `${preModel > 0 ? `; ${preModel} pre-backend` : ""})  ` +
             `best tools ${num(s.bestToolCalls)}  avg tools ${num(s.avgToolCalls, 1)}  best ${num(s.bestSeconds)}s`,
         );
         console.log(

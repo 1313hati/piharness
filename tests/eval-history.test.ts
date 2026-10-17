@@ -103,6 +103,7 @@ test("history: summarize computes pass rate and cost per scenario", () => {
   const [a, b] = summarizeHistory(entries);
   assert.equal(a.scenario, "a");
   assert.equal(a.runs, 3);
+  assert.equal(a.modelRuns, 3, "a failed-checks run that used 20 tools did reach the model");
   assert.equal(a.passed, 2);
   assert.equal(Math.round(a.passRate * 100), 67);
   assert.equal(a.bestToolCalls, 5);
@@ -110,6 +111,7 @@ test("history: summarize computes pass rate and cost per scenario", () => {
   assert.equal(a.bestSeconds, 30);
   assert.equal(a.last.runDir, "r3", "last entry is the most recent append");
   assert.equal(b.runs, 1);
+  assert.equal(b.modelRuns, 0, "no tools + no pass = never reached the backend");
   assert.equal(b.passRate, 0);
   // b's only run never called a tool (backend unreachable): no cost data,
   // and definitely not "best tools 0".

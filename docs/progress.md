@@ -345,3 +345,67 @@ collapse, transcript spacing, banner/status layout, arg/result summarisers).
 **Not done** — no mouse, no scrollback paging (a long transcript is the
 terminal's own scrollback), no syntax highlighting in tool output. The A/B
 evidence gap from M8 is unchanged.
+
+## M10: a benchmark that can say no (2026-10-17)
+
+**Goal** — the M8 claim rested on one scenario and one run per arm. Grow the
+scenario set, run each arm repeatedly, and report whatever comes out.
+
+**What was added**
+- `evals/scenarios/broken-export.json` + fixture: a re-export mismatch (`index.ts`
+  asks for `formatCurrency`, `format.ts` exports `formatMoney`) plus a negative
+  sign-formatting bug. The fixture's test is the contract; blast radius is `src/`.
+- `evals/scenarios/parse-edge.json` + fixture: two edge cases in a list parser
+  (empty input, empty segments).
+- `evals/scenarios/gates.json` + fixture: `npm test` passes while the package's
+  own build gate fails, so "run the tests and stop" is not enough.
+- 36 + 12 runs: 6 skills, 6 baseline for each new scenario; the existing
+  `offbyone-fix` already had 4 + 4 real runs from M8.
+
+**Method** — identical fixtures, limits and model (`local/qwen38`); the arms
+differ only in whether `.harness/skills` is copied into the run workspace. The
+only approved skill at this point is the "run typecheck, then test" procedure
+learned from `task-mvcoqoq7-vh5sbf`, so on these fixtures the skills arm is
+mostly a *cost* measurement, not a capability one.
+
+**Results (real runs only; `toolCalls > 0` or passed)**
+
+| scenario | arm | n | pass | tools mean ± sd | mean secs |
+| --- | --- | --- | --- | --- | --- |
+| broken-export | skills | 6 | 6 | 5.5 ± 0.8 | 14.8 |
+| broken-export | no-skills | 6 | 6 | 6.0 ± 1.3 | 13.6 |
+| gates | skills | 6 | 6 | 7.7 ± 3.4 | 17.6 |
+| gates | no-skills | 6 | 6 | 6.3 ± 2.2 | 11.5 |
+| offbyone-fix | skills | 8 | 8 | 3.9 ± 0.6 | 9.4 |
+| offbyone-fix | no-skills | 7 | 7 | 3.7 ± 0.5 | 8.6 |
+| parse-edge | skills | 6 | 6 | 5.7 ± 1.0 | 12.8 |
+| parse-edge | no-skills | 6 | 6 | 5.0 ± 0.6 | 11.7 |
+
+Pooled: skills 26/26 passed, 5.54 ± 2.18 tools; baseline 25/25 passed,
+5.20 ± 1.61 tools.
+
+**The honest reading: the benchmark is saturated.** 51 of 51 real runs pass, in
+both arms, on every scenario. A 27B model solves all four fixtures in 3–8 tool
+calls, so there is no headroom for a skill to show up in the pass rate, and the
+0.34-tool difference is far smaller than the spread within each arm (sd 1.6–2.2)
+at n≈25. Any claim of the form "skills made the agent better" from this data
+would be noise dressed up as evidence. What this does establish is that the
+plumbing works: scenarios run, arms differ in exactly one input, failures are
+recorded as failures, and `eval score` reports both arms separately.
+
+**Also fixed**
+- `eval score` divided by every recorded run, so two runs from before the local
+  endpoint existed (0 tool calls, 28s of connect retries) made both arms look
+  like 88%/89% pass. It now reports "passed N (X% of M that reached the model;
+  K pre-backend)" and computes the rate over runs that passed or called a tool.
+  The stale records stay in the append-only history — that is the point of it.
+
+**Next action (real, not assumed)**
+- To get a measurable A/B, the tasks have to be at or beyond the model's
+  one-shot ability: multi-file refactors with a failing suite, long-horizon
+  tasks where context management matters, or tasks whose *procedure* is
+  non-obvious (release steps, migration order). Saturation at 51/51 says the
+  current fixtures measure the harness, not the learning.
+- Better still: keep the current set as a regression suite (it should stay at
+  100%) and add a separate "hard" set where baseline pass rate is well below
+  1.0 — a skill can only be shown to help where the baseline sometimes fails.

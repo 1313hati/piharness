@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "gates",
+  "description": "The package's tests pass but its build gate fails; finishing the work means running the project's gates, not just the tests.",
+  "fixture": "../fixtures/gates",
+  "goal": "This package is not finished: its public surface is incomplete. Make the package's own quality gates pass. Do not modify anything under tests/ or scripts/ — if a gate fails, fix the source.",
+  "checks": [
+    {
+      "description": "tests pass",
+      "command": "npm test"
+    },
+    {
+      "description": "build gate passes",
+      "command": "npm run build"
+    }
+  ],
+  "limits": {
+    "maxToolCalls": 24,
+    "maxTaskMinutes": 10
+  }
+}

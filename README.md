@@ -153,7 +153,7 @@ docs/progress.md      Current milestone, evidence, next action
 
 ## Status
 
-See [docs/progress.md](docs/progress.md). M0–M8 are done with 89/89 tests and clean typecheck/build. The whole loop has run against the real local model (`local/qwen38`, Qwen3.8 27B UD-Q4_K_XL on llama.cpp): managed tasks complete with passing checks, both eval arms pass a scenario, and a skill learned from a completed task is proposed, evaluated, promoted and then observed in a later run's injected context. The A/B arm difference is not yet statistically meaningful (one run per arm) — see the M8 section for the honest reading. M9 adds packaging (`piharness` command, isolated agent dir) and the black/orange TUI.
+See [docs/progress.md](docs/progress.md). M0–M9 are done with 92/92 tests and clean typecheck/build. The whole loop has run against the real local model (`local/qwen38`, Qwen3.8 27B UD-Q4_K_XL on llama.cpp): managed tasks complete with passing checks, both eval arms pass a scenario, and a skill learned from a completed task is proposed, evaluated, promoted and then observed in a later run's injected context. The A/B arm difference is not yet statistically meaningful (one run per arm) — see the M8 section for the honest reading. M9 adds packaging (`piharness` command, isolated agent dir) and the black/orange TUI; M10 grows the benchmark to four scenarios and twelve runs per arm — see the saturation caveat there.
 
 ## Trust model
 
