@@ -7,8 +7,6 @@
 
 import {
   readFileSync,
-  writeFileSync,
-  renameSync,
   mkdirSync,
   existsSync,
   unlinkSync,
@@ -16,8 +14,10 @@ import {
   readdirSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
-import { randomUUID } from "node:crypto";
 import { ACTIVE_PHASES, type TaskRecord } from "./types.js";
+import { atomicWriteJson } from "../fsutil.js";
+
+export { atomicWriteJson }; // re-exported for existing consumers
 
 const STATE_DIR = ".harness/state";
 const TASKS_DIR = "tasks";
@@ -51,12 +51,7 @@ function lockPath(workspace: string): string {
  * Write JSON atomically: write to a temp file in the same directory, then
  * rename over the target. A crash mid-write never leaves a partial file.
  */
-export function atomicWriteJson(path: string, data: unknown): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${randomUUID()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf-8");
-  renameSync(tmp, path);
-}
+
 
 // ─── Task record I/O ───────────────────────────────────────────────────────────
 

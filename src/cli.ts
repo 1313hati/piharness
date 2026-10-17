@@ -8,6 +8,7 @@
  *   harness task "goal"        Managed task with acceptance checks (M2)
  *   harness resume [id]        Resume an active managed task
  *   harness status [id]        Show task state (or the active task)
+ *   harness memory <list|add|remove>   Manage project memory facts (M3)
  *   harness doctor             Configuration/backend diagnostics
  */
 
@@ -20,13 +21,24 @@ import {
 } from "./task/controller.js";
 import { findActiveTask, listTaskIds, loadTask, saveTask } from "./task/store.js";
 import type { TaskCheck } from "./task/types.js";
+import {
+  buildContextBlock,
+  loadMemory,
+  addFact,
+  removeFact,
+  MemoryError,
+} from "./context/index.js";
 
 // ─── Argument parsing ──────────────────────────────────────────────────────────
 
 interface CliArgs {
-  command: "interactive" | "run" | "task" | "resume" | "status" | "doctor";
+  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "doctor";
   task?: string;
+  /** Positional args after the first (e.g. the fact text in memory add). */
+  extras: string[];
   checks: string[];
+  tags: string[];
+  source?: "user" | "verified";
   provider?: string;
   model?: string;
   cwd?: string;
@@ -34,7 +46,7 @@ interface CliArgs {
 
 function parseArgs(argv: string[]): CliArgs {
   const args = argv.slice(2);
-  const result: CliArgs = { command: "interactive", checks: [] };
+  const result: CliArgs = { command: "interactive", checks: [], extras: [], tags: [] };
 
   let i = 0;
   while (i < args.length) {
@@ -52,6 +64,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "status":
         result.command = "status";
         break;
+      case "memory":
+        result.command = "memory";
+        break;
       case "doctor":
         result.command = "doctor";
         break;
@@ -67,6 +82,18 @@ function parseArgs(argv: string[]): CliArgs {
       case "--check":
         result.checks.push(args[++i]);
         break;
+      case "--tag":
+        result.tags.push(args[++i]);
+        break;
+      case "--source": {
+        const v = args[++i];
+        if (v !== "user" && v !== "verified") {
+          console.error('--source must be "user" or "verified"');
+          process.exit(1);
+        }
+        result.source = v;
+        break;
+      }
       case "--help":
       case "-h":
         printHelp();
@@ -77,8 +104,10 @@ function parseArgs(argv: string[]): CliArgs {
           console.error(`Unknown option: ${arg}`);
           process.exit(1);
         }
-        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status")) {
-          result.task = arg; // goal for run/task; task id for resume/status
+        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory")) {
+          result.task = arg; // goal for run/task; id for resume/status; subcommand for memory
+        } else if (result.task !== undefined && result.command === "memory") {
+          result.extras.push(arg); // fact text / id for memory subcommands
         } else {
           console.error(`Unexpected argument: ${arg}`);
           process.exit(1);
@@ -101,6 +130,9 @@ Usage:
   harness task "goal"            Managed task with acceptance checks
   harness resume [id]            Resume an active managed task
   harness status [id]            Show task state (default: active task)
+  harness memory list            List project memory facts
+  harness memory add "fact"      Add a memory fact (tags via --tag, --source user|verified)
+  harness memory remove <id>     Remove a memory fact
   harness doctor                 Check configuration and backend
 
 Options:
@@ -108,6 +140,8 @@ Options:
   --model <id>       Model id (default: qwen38)
   --cwd <dir>        Working directory (default: .)
   --check "d|cmd"    Acceptance check: description, optional |verification command (repeatable)
+  --tag <t>          Tag for memory add (repeatable)
+  --source <s>       Source for memory add: user|verified
   -h, --help         Show this help
 `);
 }
@@ -237,6 +271,20 @@ async function runManagedTask(
   const mode = resumeId ? `resume ${resumeId}` : "new task";
   console.error(`\x1b[90mManaged ${mode}: ${goal}\x1b[0m`);
   console.error(`\x1b[90mModel: ${config.provider}/${config.model} | CWD: ${config.cwd}\x1b[0m`);
+  // M3: inject relevant memory facts + skills into the implementation prompt.
+  let contextBlock = "";
+  try {
+    contextBlock = buildContextBlock(config.cwd, goal);
+  } catch (e) {
+    if (e instanceof MemoryError) {
+      console.error(`\x1b[31mMemory unusable (${e.message}); continuing without injected context.\x1b[0m`);
+    } else {
+      throw e;
+    }
+  }
+  if (contextBlock) {
+    console.error("\x1b[90mContext: memory facts and/or skills selected for this goal.\x1b[0m");
+  }
   for (const c of checks) {
     console.error(`\x1b[90mCheck ${c.id}: ${c.description}${c.command ? ` (verify: ${c.command})` : ""}\x1b[0m`);
   }
@@ -268,6 +316,7 @@ async function runManagedTask(
       },
       model: `${config.provider}/${config.model}`,
       resumeId,
+      contextBlock: contextBlock || undefined,
       createSession: async (_prompt) =>
         createHarnessSession({
           cwd: config.cwd,
@@ -383,6 +432,61 @@ async function runInteractive(config: HarnessConfig): Promise<void> {
 
 // ─── Doctor ────────────────────────────────────────────────────────────────────
 
+function runMemory(config: HarnessConfig, args: CliArgs): void {
+  const sub = args.task;
+  const extras = args.extras;
+  const ws = config.cwd;
+  try {
+    switch (sub) {
+      case "list": {
+        const mem = loadMemory(ws);
+        if (mem.facts.length === 0) {
+          console.log('No memory facts. Add one with: harness memory add "fact text" --tag t1 --tag t2');
+          return;
+        }
+        for (const f of mem.facts) {
+          const tags = f.tags.length ? ` (${f.tags.join(", ")})` : "";
+          console.log(`${f.id}  [${f.source}]${tags}  ${f.fact}`);
+        }
+        console.log(`\n${mem.facts.length} fact(s) in .harness/memory.json`);
+        return;
+      }
+      case "add": {
+        const text = extras.join(" ").trim();
+        if (!text) {
+          console.error('Usage: harness memory add "fact text" [--tag t]... [--source user|verified]');
+          process.exit(1);
+        }
+        const f = addFact(ws, text, { tags: args.tags, source: args.source ?? "user" });
+        console.log(`Added ${f.id}: ${f.fact}`);
+        return;
+      }
+      case "remove": {
+        const id = extras[0];
+        if (!id) {
+          console.error("Usage: harness memory remove <id>");
+          process.exit(1);
+        }
+        if (!removeFact(ws, id)) {
+          console.error(`No memory fact with id ${id}`);
+          process.exit(1);
+        }
+        console.log(`Removed ${id}`);
+        return;
+      }
+      default:
+        console.error("Usage: harness memory list | add \"fact\" [--tag t]... [--source user|verified] | remove <id>");
+        process.exit(1);
+    }
+  } catch (e) {
+    if (e instanceof MemoryError) {
+      console.error(e.message);
+      process.exit(1);
+    }
+    throw e;
+  }
+}
+
 async function runDoctor(config: HarnessConfig): Promise<void> {
   console.log("piharness doctor\n");
 
@@ -489,6 +593,9 @@ async function main(): Promise<void> {
       console.log(formatStatus(record));
       break;
     }
+    case "memory":
+      runMemory(config, args);
+      break;
     case "doctor":
       await runDoctor(config);
       break;

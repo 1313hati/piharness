@@ -1,5 +1,9 @@
 node_modules/
 dist/
-.harness/
 *.log
 .DS_Store
+# .harness/: ignore everything by default (memory.json, state/...),
+# but allow explicitly tracked files: project config + approved skills.
+.harness/*
+!.harness/config.json
+!.harness/skills/

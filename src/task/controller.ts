@@ -137,6 +137,12 @@ export interface RunTaskOptions {
   onEvent?: (event: NormalizedEvent) => void;
   /** Run a check command; returns { ok, output }. */
   runCheck?: (check: TaskCheck) => Promise<{ ok: boolean; output: string }>;
+  /**
+   * Pre-rendered context block (memory facts + selected skills) from the
+   * context service. Injected into the implementation prompt only — the
+   * repair prompt stays focused on the failures.
+   */
+  contextBlock?: string;
 }
 
 export interface RunResult {
@@ -222,12 +228,12 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
 
     // ── Implementation run ──
     const startWall = Date.now();
-    session = await opts.createSession(buildPrompt(record));
+    session = await opts.createSession(buildPrompt(record, opts.contextBlock));
     record.piSessionId = session.sessionId;
     record.piSessionFile = session.sessionFile ?? null;
     saveTask(opts.workspace, record);
 
-    const stats = await opts.runPrompt(session, buildPrompt(record));
+    const stats = await opts.runPrompt(session, buildPrompt(record, opts.contextBlock));
     record.budgets.toolCallsUsed += stats.toolCalls;
     record.budgets.secondsUsed += Math.round((Date.now() - startWall) / 1000);
     record.phase = "verifying";
@@ -303,11 +309,13 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
 
 // ─── Prompt building ───────────────────────────────────────────────────────────
 
-function buildPrompt(record: TaskRecord): string {
+function buildPrompt(record: TaskRecord, contextBlock?: string): string {
   const checks = record.checks
     .map((c) => `- ${c.description}${c.command ? ` (verify: ${c.command})` : ""}`)
     .join("\n");
   return [
+    contextBlock?.trim() ? `${contextBlock.trim()}
+` : "",
     `Task: ${record.goal}`,
     "",
     "Acceptance checks:",

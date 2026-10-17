@@ -62,6 +62,32 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 **Next action**
 - M3: context service (`src/context/`) — project facts (`.harness/memory.json`) + skill selection injected into task prompts; `harness memory` command.
 
+## M3: context service — memory facts + skill selection — DONE (2026-10-17)
+
+**Implemented behavior**
+- `src/context/memory.ts`: project facts at `<ws>/.harness/memory.json` (gitignored, atomic write via new shared `src/fsutil.ts:atomicWriteJson`, also reused by `src/task/store.ts`). `loadMemory` (missing → empty; corrupt JSON / wrong schema → `MemoryError`, never silent), `addFact` (max 500 chars / 200 facts, tags lowercased), `removeFact` (unlinks file when empty).
+- `src/context/skills.ts`: discovers approved skills at `<ws>/.harness/skills/<name>/SKILL.md`; title = first `# ` heading (else dir name), description = first prose line (fence-skipped, ≤240 chars). Proposals/state dirs are never discoverable (M4 boundary).
+- `src/context/selection.ts`: deterministic relevance — goal tokens (lowercase alnum ≥3 chars) scored against fact text+tags and skill title/description/name; facts sorted score-desc then most-recent; no-match → up to 3 most-recent fallback facts marked `(general project note)`; skills capped at 3, body budget enforced (~4 chars/token). Budgets: 1000 tokens memory / 2000 tokens skills (docs/architecture.md).
+- `src/context/index.ts`: `buildContextBlock(workspace, goal)` renders the markdown block ("Project notes …" + "Relevant skills …"), empty string when nothing selected.
+- Injection: `controller.ts:buildPrompt` prepends the block to the implementation prompt only (repair prompt stays failure-focused); `cli.ts runManagedTask` builds it per task — `MemoryError` → warn + continue without context, other errors rethrow. New `harness memory list|add|remove` command with `--tag` / `--source user|verified`.
+
+**Commands/checks and outcomes**
+- `npm run typecheck` → clean; `npm run build` → clean.
+- `npm test` → 47/47 pass (config 5, events 14, task-store 10 incl. 3 workspace-lock tests, controller 4, context 14). `tests/context.test.ts` covers memory round-trip, corrupt-file `MemoryError`, bad-schema `MemoryError`, empty-fact rejection, skill parse/fallback-title, matched-fact ranking, no-match fallback recency, 3-skill cap + body budget, goalTokens/estimateTokens, render format, e2e `buildContextBlock`.
+- Real-model context-injection smoke (qwen38 @ `http://127.0.0.1:8080/v1`, `evals/fixtures/offbyone`): seeded `memory add "…must stay exported as sum…" --tag sum --tag api --source verified` + a `sum-tests` SKILL.md, then
+  ```
+  npx tsx src/cli.ts task "off-by-one sum(n): 1+..+n returns wrong total" --check "sum tests pass|npm test" --cwd evals/fixtures/offbyone
+  ```
+  → CLI printed `Context: memory facts and/or skills selected for this goal.`, task `task-mvcf6zc1-kuhnv2` → `completed`, 5/40 tool calls, repair 0/2, check `c1 PASS`, exit 0, Pi session `01a14a01-8784-745d-bf66-7fbbd114eb10`. The agent's final message cited the injected skill: "(`npm test`, per the sum-tests skill)" — proof the block reached the model. Fixture restored (`git checkout` + removed `.harness`).
+
+**Known limitation / blocker**
+- Relevance is substring token matching — crude (no stemming/embeddings); adequate at this scale.
+- Skills are injected by name match only; there is no automatic skill creation yet (M4).
+- Context block is built once per task start; facts added mid-task are not picked up.
+
+**Next action**
+- M4: learning service (`src/skills/`) — propose new skills from completed tasks, store under `.harness/state/proposals/`, approve into `.harness/skills/`.
+
 ## M1 evidence (2026-10-17)
 
 **Implemented behavior**
