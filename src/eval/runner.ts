@@ -19,6 +19,14 @@ import { EvalError, type Scenario } from "./scenarios.js";
 
 export const SCENARIO_MANIFEST_VERSION = 1;
 
+/**
+ * Which context arm a run belongs to. `skills` = the run workspace carries the
+ * approved skills from `.harness/skills/`; `no-skills` = same fixture, same
+ * memory, but no learned procedures — the baseline the other arm is measured
+ * against.
+ */
+export type ScenarioVariant = "skills" | "no-skills";
+
 /** Runs one task in the given workspace. Injected by the CLI (real) or tests. */
 export type ScenarioRunner = (opts: {
   workspace: string;
@@ -43,6 +51,8 @@ export interface ScenarioManifest {
   budgets: TaskBudgets;
   durationMs: number;
   checks: Array<{ id: string; description: string; command?: string }>;
+  /** Context arm this run belongs to. */
+  variant: ScenarioVariant;
   /** Skills that were available in the run workspace (injected context). */
   contextSkills: string[];
   validationResults: string[];
@@ -73,15 +83,19 @@ function copyFixture(fixtureDir: string, dest: string): void {
   });
 }
 
-/** Copy learned context (facts + approved skills) so the run is self-contained. */
-function copyContext(repoRoot: string, dest: string): void {
+/**
+ * Copy learned context (facts + approved skills) so the run is self-contained.
+ * `includeSkills: false` keeps the facts and drops the procedures — that is
+ * what makes an A/B comparison of learned skills possible at all.
+ */
+function copyContext(repoRoot: string, dest: string, includeSkills: boolean): void {
   const memory = join(repoRoot, ".harness", "memory.json");
   if (existsSync(memory)) {
     mkdirSync(join(dest, ".harness"), { recursive: true });
     cpSync(memory, join(dest, ".harness", "memory.json"));
   }
   const skills = join(repoRoot, ".harness", "skills");
-  if (existsSync(skills)) {
+  if (includeSkills && existsSync(skills)) {
     mkdirSync(join(dest, ".harness"), { recursive: true });
     cpSync(skills, join(dest, ".harness", "skills"), { recursive: true });
   }
@@ -121,9 +135,11 @@ export async function runScenario(opts: {
   model: string;
   runner: ScenarioRunner;
   defaults: TaskLimits;
+  variant?: ScenarioVariant;
   now?: () => number;
 }): Promise<ScenarioRun> {
   const { repoRoot, scenario, runner, model } = opts;
+  const variant: ScenarioVariant = opts.variant ?? "skills";
   if (!existsSync(scenario.fixtureDir)) {
     throw new EvalError(`fixture directory not found: ${scenario.fixtureDir}`);
   }
@@ -131,13 +147,13 @@ export async function runScenario(opts: {
   const startedAt = new Date(now()).toISOString();
   const runDir = join(
     evalsDir(repoRoot),
-    `${scenario.name}-${now().toString(36)}`,
+    `${scenario.name}${variant === "no-skills" ? "-noskills" : ""}-${now().toString(36)}`,
   );
   const workspace = join(runDir, "work");
   mkdirSync(workspace, { recursive: true });
 
   copyFixture(scenario.fixtureDir, workspace);
-  copyContext(repoRoot, workspace);
+  copyContext(repoRoot, workspace, variant === "skills");
   initBaseline(workspace);
 
   const limits = resolveLimits(scenario, opts.defaults);
@@ -152,6 +168,7 @@ export async function runScenario(opts: {
     fixture: scenario.fixture,
     workspace: relative(repoRoot, workspace),
     model,
+    variant,
     phase: "error",
     passed: false,
     taskId: "",

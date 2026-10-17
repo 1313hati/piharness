@@ -191,6 +191,34 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 - Unblock the backend, then `eval run --all` twice: the second run's history line proves the loop records comparable evidence (pass rate, cost per run).
 - Then M7: use the scoreboard for the actual product claim — run `offbyone-fix` with and without the learned skill promoted in M4 and compare pass rate/cost, i.e. evidence that learning helps rather than an assertion.
 
+## M7: A/B arms — measure the skills, not just the run — CODE COMPLETE (2026-10-17)
+
+**Implemented behavior**
+- A run now belongs to a `variant`. `skills` (default) copies `.harness/skills/` into the run workspace; `no-skills` (`--no-skills`) copies `memory.json` but no procedures. The arm is a property of the *workspace*, not a flag inside the context service — so the injected context is genuinely absent rather than rendered-then-filtered, and nothing in `src/context/` needs to know evaluations exist.
+- Manifests record `variant` and the run directory gains a `-noskills` suffix, so two arms never collide on a timestamp.
+- History entries carry `variant`; `summarizeHistory` groups by (scenario, variant) and sorts baseline-first. Pooling arms would hide the exact difference the scoreboard exists to show, so it is not offered.
+- CLI: `harness eval run <name> --no-skills`, `eval score` prints one block per arm with `[skills]` / `[no-skills]`.
+- Older history lines written before M7 have no `variant` and are read as `skills` — the file is append-only and must not need rewriting.
+
+**Commands/checks and outcomes**
+- `npm run typecheck` → clean; `npm run build` → clean; `npm test` → 78/78 (2 new tests: end-to-end arm capture proving the baseline workspace has no skills directory while the skills arm carries the promoted one, and arm-separated aggregation).
+- CLI, both arms against the same scenario:
+  ```
+  node dist/cli.js eval run offbyone-fix --no-skills
+    → FAIL offbyone-fix [no-skills] … evidence .harness/state/evals/offbyone-fix-noskills-mvco9wl0
+  node dist/cli.js eval score
+    → offbyone-fix [no-skills]  runs 1  passed 0 (0%)  best 28.8s
+      offbyone-fix [skills]     runs 1  passed 0 (0%)  best 28.7s
+  ```
+  Two separate rows, each pointing at its own evidence directory.
+
+**Known limitation**
+- There is still no promoted skill in this repo (M4's learning chain has never run end to end), so both arms are currently **identical by construction** — they differ only in the `variant` label. The A/B machinery is real; the experiment it enables is not yet possible.
+- Backend still down; both arms fail with 0 tool calls, so no cost comparison exists either.
+
+**Next action**
+- Unblock the backend → run the M4 chain to promote a real skill → `eval run --no-skills` and `eval run` → compare the two arms. That is the first honest answer to "does the harness get better at recurring work?"
+
 ## M1 evidence (2026-10-17)
 
 **Implemented behavior**

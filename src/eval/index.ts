@@ -19,7 +19,7 @@ export {
   runScenario,
   listRunDirs,
 } from "./runner.js";
-export type { ScenarioManifest, ScenarioRun, ScenarioRunner } from "./runner.js";
+export type { ScenarioManifest, ScenarioRun, ScenarioRunner, ScenarioVariant } from "./runner.js";
 
 export { historyPath, appendHistory, readHistory, summarizeHistory } from "./history.js";
 export type { HistoryEntry, ScenarioSummary } from "./history.js";

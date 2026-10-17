@@ -45,6 +45,7 @@ npx tsx src/cli.ts eval run offbyone-fix
 npx tsx src/cli.ts eval run --all
 npx tsx src/cli.ts eval run offbyone-fix --dry-run   # validate only, no model
 npx tsx src/cli.ts eval score                        # pass rate / cost across runs
+npx tsx src/cli.ts eval run offbyone-fix --no-skills # baseline arm: no learned skills
 
 # Diagnostics (node version, model resolution, local endpoint)
 npx tsx src/cli.ts doctor
@@ -91,7 +92,7 @@ docs/progress.md      Current milestone, evidence, next action
 
 ## Status
 
-See [docs/progress.md](docs/progress.md). M0–M6 are code-complete with 76/76 tests and clean typecheck/build; every real-model run (M4 learning smoke, M5/M6 scenarios) is still blocked on a reachable local endpoint.
+See [docs/progress.md](docs/progress.md). M0–M7 are code-complete with 78/78 tests and clean typecheck/build; every real-model run (M4 learning smoke, M5/M6 scenarios) is still blocked on a reachable local endpoint.
 
 ## Trust model
 

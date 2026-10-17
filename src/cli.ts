@@ -67,6 +67,8 @@ interface CliArgs {
   dryRun?: boolean;
   /** eval run --all: run every scenario. */
   all?: boolean;
+  /** eval run --no-skills: baseline arm with learned skills withheld. */
+  noSkills?: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -127,6 +129,9 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case "--all":
         result.all = true;
+        break;
+      case "--no-skills":
+        result.noSkills = true;
         break;
       case "--tag":
         result.tags.push(args[++i]);
@@ -189,7 +194,8 @@ Usage:
   harness eval run <name>        Run one scenario into .harness/state/evals/
   harness eval run --all         Run every scenario
   harness eval run <name> --dry-run   Validate a scenario without calling a model
-  harness eval score [name]      Pass rate and cost across recorded runs
+  harness eval run <name> --no-skills  Baseline arm: same run with learned skills withheld
+  harness eval score [name]      Pass rate and cost across recorded runs, per arm
   harness doctor                 Check configuration and backend
 
 Options:
@@ -199,6 +205,9 @@ Options:
   --check "d|cmd"    Acceptance check: description, optional |verification command (repeatable)
   --tag <t>          Tag for memory add (repeatable)
   --source <s>       Source for memory add: user|verified
+  --dry-run          eval run: validate the scenario, execute nothing
+  --all              eval run: every scenario
+  --no-skills        eval run: omit .harness/skills from the run workspace (baseline arm)
   -h, --help         Show this help
 `);
 }
@@ -566,7 +575,7 @@ async function runEval(config: HarnessConfig, args: CliArgs): Promise<void> {
         process.exit(1);
       }
       for (const s of summaries) {
-        console.log(s.scenario);
+        console.log(`${s.scenario} [${s.variant}]`);
         console.log(
           `  runs ${s.runs}  passed ${s.passed} (${Math.round(s.passRate * 100)}%)  ` +
             `best tools ${s.bestToolCalls}  avg tools ${s.avgToolCalls.toFixed(1)}  best ${s.bestSeconds}s`,
@@ -618,14 +627,16 @@ async function runEval(config: HarnessConfig, args: CliArgs): Promise<void> {
     }
 
     const runner = makeScenarioRunner(config);
+    const variant = args.noSkills ? "no-skills" : "skills";
     const runs = [];
     for (const s of targets) {
-      console.error(`\n\x1b[90m─── eval ${s.name} ───\x1b[0m`);
+      console.error(`\n\x1b[90m─── eval ${s.name} (${variant}) ───\x1b[0m`);
       const run = await runScenario({
         repoRoot,
         scenario: s,
         model: `${config.provider}/${config.model}`,
         runner,
+        variant,
         defaults: {
           maxToolCalls: config.maxToolCalls,
           maxTaskMinutes: config.maxTaskMinutes,
@@ -635,7 +646,7 @@ async function runEval(config: HarnessConfig, args: CliArgs): Promise<void> {
       runs.push(run);
       const m = run.manifest;
       console.log(
-        `${m.passed ? "PASS" : "FAIL"} ${m.scenario}  phase=${m.phase} ` +
+        `${m.passed ? "PASS" : "FAIL"} ${m.scenario} [${m.variant}]  phase=${m.phase} ` +
           `tools=${m.budgets.toolCallsUsed} repairs=${m.budgets.repairCyclesUsed} ` +
           `${Math.round(m.durationMs / 1000)}s`,
       );

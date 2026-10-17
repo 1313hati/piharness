@@ -10,11 +10,13 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { ScenarioManifest } from "./runner.js";
+import type { ScenarioManifest, ScenarioVariant } from "./runner.js";
 
 export interface HistoryEntry {
   at: string;
   scenario: string;
+  /** "skills" (learned procedures present) or "no-skills" (baseline arm). */
+  variant: ScenarioVariant;
   passed: boolean;
   phase: string;
   toolCalls: number;
@@ -27,6 +29,7 @@ export interface HistoryEntry {
 
 export interface ScenarioSummary {
   scenario: string;
+  variant: ScenarioVariant;
   runs: number;
   passed: number;
   passRate: number;
@@ -45,6 +48,7 @@ export function appendHistory(repoRoot: string, manifest: ScenarioManifest, runD
   const entry: HistoryEntry = {
     at: manifest.at,
     scenario: manifest.scenario,
+    variant: manifest.variant,
     passed: manifest.passed,
     phase: manifest.phase,
     toolCalls: manifest.budgets.toolCallsUsed,
@@ -88,6 +92,7 @@ export function readHistory(repoRoot: string): HistoryEntry[] {
           seconds: Number(e.seconds) || 0,
           phase: typeof e.phase === "string" ? e.phase : "unknown",
           model: typeof e.model === "string" ? e.model : "unknown",
+          variant: e.variant === "no-skills" ? "no-skills" : "skills",
           runDir: typeof e.runDir === "string" ? e.runDir : "",
         });
       }
@@ -98,21 +103,27 @@ export function readHistory(repoRoot: string): HistoryEntry[] {
   return out;
 }
 
-/** Per-scenario aggregation, scenarios sorted by name. */
+/**
+ * Per-scenario-per-variant aggregation. Arms stay separate: pooling a
+ * `skills` run with a `no-skills` run would hide exactly the difference the
+ * scoreboard exists to show.
+ */
 export function summarizeHistory(entries: HistoryEntry[]): ScenarioSummary[] {
-  const byScenario = new Map<string, HistoryEntry[]>();
+  const byKey = new Map<string, { scenario: string; variant: ScenarioVariant; runs: HistoryEntry[] }>();
   for (const e of entries) {
-    const list = byScenario.get(e.scenario);
-    if (list) list.push(e);
-    else byScenario.set(e.scenario, [e]);
+    const key = `${e.scenario}::${e.variant}`;
+    const bucket = byKey.get(key);
+    if (bucket) bucket.runs.push(e);
+    else byKey.set(key, { scenario: e.scenario, variant: e.variant, runs: [e] });
   }
   const summaries: ScenarioSummary[] = [];
-  for (const [scenario, runs] of byScenario) {
+  for (const { scenario, variant, runs } of byKey.values()) {
     const passed = runs.filter((r) => r.passed).length;
     const toolCalls = runs.map((r) => r.toolCalls);
     const seconds = runs.map((r) => r.seconds);
     summaries.push({
       scenario,
+      variant,
       runs: runs.length,
       passed,
       passRate: passed / runs.length,
@@ -122,5 +133,10 @@ export function summarizeHistory(entries: HistoryEntry[]): ScenarioSummary[] {
       last: runs[runs.length - 1],
     });
   }
-  return summaries.sort((a, b) => a.scenario.localeCompare(b.scenario));
+  return summaries.sort(
+    (a, b) =>
+      a.scenario.localeCompare(b.scenario) ||
+      // baseline arm first, so "skills vs no-skills" reads left to right
+      a.variant.localeCompare(b.variant),
+  );
 }
