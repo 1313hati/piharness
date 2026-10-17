@@ -27,9 +27,13 @@ llama-server). It comes from `/slots`:
 | panel field | source |
 |---|---|
 | `tokens` | `n_prompt_tokens` in, `n_decoded` out (`next_token[0]`) |
-| `speed` | Δ`n_decoded` / Δt between two snapshots, kept in `~/.local/state/coder/live.json`; `generating` until a second sample exists |
+| `speed` | Δ`n_decoded` / Δt between two snapshots, kept in `~/.local/state/coder/live.json`. With no second sample yet it falls back to `n_decoded` / time since the task started, so the first poll already shows a number; idle shows `idle · last N t/s`. The same string is the bar tooltip |
 | `ctx` | `n_prompt_tokens + n_decoded` / `n_ctx` |
 | `req` | count of distinct `id_task` values since the state file was created |
 
 QML caches imported JavaScript for the life of the shell, so after editing
 `Model.js` or `Panel.qml` run `omarchy-restart-shell` — a reboot is not needed.
+
+The speed row is the fourth row of the home section (`⚡ speed`), and the Local AI
+icon in the bar repeats it as a tooltip, so the number is readable without
+opening the panel.

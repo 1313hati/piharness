@@ -1,5 +1,5 @@
 diff --git i/Model.js w/Model.js
-index 9fc0bcc..9730d23 100644
+index 9fc0bcc..650ac32 100644
 --- i/Model.js
 +++ w/Model.js
 @@ -582,7 +582,7 @@ function weights(rows, list) {
@@ -42,17 +42,19 @@ index 9fc0bcc..9730d23 100644
    // usage reporting is off until you choose: home asks once, and either answer is kept and ends the question; No thanks
    // comes first, so the first keyboard focus never turns it on
    if (s.reporting === "unset" && (!ui.view || ui.view === "home"))
-@@ -670,7 +694,7 @@ function build(s, ui) {
+@@ -670,7 +694,9 @@ function build(s, ui) {
        items: [{ label: ui.updatingAgent === "plugin" ? "Updating…" : "Update Local AI", action: ui.updatingAgent ? "" : "update|plugin" }] })
    if (ui.problem || ui.pollProblem || s.setupError) v.rows.unshift({ type: "error", label: ui.problem || ui.pollProblem || s.setupError })
    else if (ui.notice) v.rows.unshift({ type: "banner", text: ui.notice })
 -  return Object.assign(v, { mark: ui.problem || ui.pollProblem || s.setupError ? "failed" : mark(s) })
++  // the bar's tooltip reads this: the coder server's speed without opening the panel
++  v.coder = s.coder ? { speed: s.coder.speed, contextUsed: s.coder.contextUsed || "", tokens: s.coder.tokens || "" } : null
 +  return Object.assign(v, { mark: ui.problem || ui.pollProblem || s.setupError ? "failed" : mark(s) || (s.coder && s.coder.state === "ready" ? "ready" : s.coder && s.coder.pid ? "busy" : "") })
  }
  
  if (typeof module !== "undefined") module.exports = { build: build, parse: parse, tones: tones, catalog: catalog, cardText: cardText }
 diff --git i/Panel.qml w/Panel.qml
-index 7b6208d..432874e 100644
+index 7b6208d..47424f5 100644
 --- i/Panel.qml
 +++ w/Panel.qml
 @@ -17,7 +17,7 @@ Panel {
@@ -72,12 +74,23 @@ index 7b6208d..432874e 100644
      case "forget": run(["forget", a[1]]); nav({ open: "" }); break
      // a folder a recipe no longer offered left behind (the snapshot's unoffered)
      case "discard": run(["forget", "--folder", a[1]]); break
+@@ -332,7 +333,9 @@ Panel {
+     objectName: "local-ai-mark"
+     anchors.fill: parent
+     bar: root.bar
+-    tooltipText: "Local AI"
++    tooltipText: root.view.coder && root.view.coder.speed
++      ? "Local AI · qwen3.8 27B · " + root.view.coder.speed + (root.view.coder.contextUsed ? " · " + root.view.coder.contextUsed : "")
++      : "Local AI"
+     onPressed: root.toggle()
+     iconComponent: Component {
+       Item {
 diff --git i/bin/omarchy-local-ai-coder w/bin/omarchy-local-ai-coder
 new file mode 100755
-index 0000000..ac34fd0
+index 0000000..f5de333
 --- /dev/null
 +++ w/bin/omarchy-local-ai-coder
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,224 @@
 +#!/usr/bin/env python3
 +"""Local integration: share coder.sh's native server with the Local AI panel."""
 +import contextlib
@@ -141,22 +154,31 @@ index 0000000..ac34fd0
 +        prev = {}
 +
 +    # The panel polls every 1.5-5 s, but the bar also runs snapshot every 30 s,
-+    # so short gaps reuse the last rate instead of reporting noise.
++    # so short gaps reuse the last rate instead of reporting noise. Averaging
++    # over the task gives a real number on the first poll, when there is no
++    # second sample to difference against yet.
 +    speed = float(prev.get('speed') or 0.0)
++    last = float(prev.get('lastSpeed') or 0.0)
++    started = float(prev.get('taskStart') or 0.0)
 +    same = prev.get('task') == task and prev.get('decoded') is not None
-+    if same:
-+        dt = now - float(prev.get('ts') or 0)
-+        dd = out - int(prev.get('decoded') or 0)
-+        if dt >= 1.0 and dt < 120 and dd >= 0:
-+            speed = dd / dt
-+    else:
++    if not same:
 +        speed = 0.0
++        started = now
++    dt = now - float(prev.get('ts') or 0)
++    dd = out - int(prev.get('decoded') or 0)
++    if same and dt >= 1.0 and dt < 120 and dd >= 0:
++        speed = dd / dt
++    elif same and out > 0 and now > started:
++        speed = out / (now - started)
++    if speed > 0:
++        last = speed
 +    if task is not None and prev.get('task') != task:
 +        requests += 1
 +
 +    try:
 +        STATE.mkdir(parents=True, exist_ok=True)
-+        path.write_text(json.dumps({'task': task, 'decoded': out, 'ts': now, 'requests': requests, 'speed': speed}))
++        path.write_text(json.dumps({'task': task, 'decoded': out, 'ts': now, 'requests': requests,
++                                    'speed': speed, 'lastSpeed': last, 'taskStart': started}))
 +    except OSError:
 +        pass
 +
@@ -167,7 +189,10 @@ index 0000000..ac34fd0
 +        'promptTokens': prompt,
 +        'cachedTokens': cached,
 +        'outputTokens': out,
-+        'speed': f'{speed:.1f} t/s' if speed > 0 else ('generating' if processing else 'idle'),
++        'speed': f'{speed:.1f} t/s' if speed > 0 else (
++            f'idle · last {last:.1f} t/s' if not processing and last > 0 else
++            ('starting' if processing else 'idle')),
++        'speedValue': round(speed or last, 1),
 +        'requests': requests,
 +        'task': task,
 +    }
