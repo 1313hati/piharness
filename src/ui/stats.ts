@@ -46,14 +46,19 @@ export class StreamMeter {
     }
   }
 
-  /** Tokens/sec: exact after `finish`, estimated while streaming, null if unknown. */
+  /**
+   * Tokens/sec over the window where the model was actually emitting
+   * (thinking + text). This is decode speed, so it excludes prompt
+   * processing; the provider's `output_tokens` excludes thinking on reasoning
+   * models, which made wall-clock math report absurdly low numbers for short
+   * answers. `finish()` is only the fallback when no stream arrived.
+   */
   rate(now = Date.now()): number | null {
-    if (this.finalRate !== null) return this.finalRate;
-    if (this.firstAt === null || this.lastAt === null) return null;
-    const spanMs = Math.max(this.lastAt - this.firstAt, 250);
-    const seconds = spanMs / 1000;
-    const tokens = this.chars / 4;
-    return tokens / seconds;
+    if (this.firstAt !== null && this.lastAt !== null) {
+      const spanMs = Math.max(this.lastAt - this.firstAt, 250);
+      return this.chars / 4 / (spanMs / 1000);
+    }
+    return this.finalRate;
   }
 
   get streamedChars(): number {

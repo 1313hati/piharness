@@ -20,6 +20,9 @@ import { join } from "node:path";
 import { loadConfig, type HarnessConfig } from "./config.js";
 import { ensureAgentDir } from "./pi/agent-dir.js";
 import { createHarnessSession, type HarnessSession, type NormalizedEvent } from "./pi/session.js";
+import { deriveEvidence, listEvidence, loadEvidence } from "./learn/evidence.js";
+import type { TranscriptBlock } from "./ui/blocks.js";
+import { DEFAULT_MIN_EVIDENCE, learnFromSession } from "./learn/mine.js";
 import { createBuiltinExtensions, type BuiltinResult } from "./extensions/builtin.js";
 import {
   addTodo, clearDoneTodos, completeTodo, loadTodos, removeTodo, reopenTodo, renderTodos,
@@ -62,7 +65,7 @@ import {
 // ─── Argument parsing ──────────────────────────────────────────────────────────
 
 interface CliArgs {
-  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "todo" | "skill" | "eval" | "doctor";
+  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "todo" | "skill" | "eval" | "learn" | "doctor";
   task?: string;
   /** Positional args after the first (e.g. the fact text in memory add). */
   extras: string[];
@@ -78,6 +81,9 @@ interface CliArgs {
   all?: boolean;
   /** eval run --no-skills: baseline arm with learned skills withheld. */
   noSkills?: boolean;
+  noPromote?: boolean;
+  /** Evidence needed before auto-promotion (default 2). */
+  minEvidence?: number;
   /** interactive: force the line REPL instead of the TUI. */
   plain?: boolean;
 }
@@ -123,6 +129,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "eval":
         result.command = "eval";
         break;
+      case "learn":
+        result.command = "learn";
+        break;
       case "doctor":
         result.command = "doctor";
         break;
@@ -147,6 +156,18 @@ function parseArgs(argv: string[]): CliArgs {
       case "--no-skills":
         result.noSkills = true;
         break;
+      case "--no-promote":
+        result.noPromote = true;
+        break;
+      case "--min-evidence": {
+        const v = Number(args[++i]);
+        if (!Number.isFinite(v) || v < 1) {
+          console.error("--min-evidence must be a positive number");
+          process.exit(1);
+        }
+        result.minEvidence = v;
+        break;
+      }
       case "--plain":
         result.plain = true;
         break;
@@ -172,9 +193,9 @@ function parseArgs(argv: string[]): CliArgs {
           console.error(`Unknown option: ${arg}`);
           process.exit(1);
         }
-        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory" || result.command === "todo" || result.command === "skill" || result.command === "eval")) {
+        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory" || result.command === "todo" || result.command === "skill" || result.command === "eval" || result.command === "learn")) {
           result.task = arg; // goal for run/task; id for resume/status; subcommand for memory/skill/eval
-        } else if (result.task !== undefined && (result.command === "memory" || result.command === "todo" || result.command === "skill" || result.command === "eval")) {
+        } else if (result.task !== undefined && (result.command === "memory" || result.command === "todo" || result.command === "skill" || result.command === "eval" || result.command === "learn")) {
           result.extras.push(arg); // subcommand's arguments (ids/names)
         } else {
           console.error(`Unexpected argument: ${arg}`);
@@ -205,6 +226,8 @@ Usage:
   piharness memory list             List project memory facts
   piharness memory add "fact"       Add a memory fact (--tag, --source user|verified)
   piharness memory remove <id>      Remove a memory fact
+  piharness learn [id] [--dry-run]  Mine stored sessions into skill proposals
+  piharness learn list              What has been learned, and how much evidence
   piharness skill propose <taskId>  Draft a skill proposal from a completed task
   piharness skill list              List skill proposals (inert until approved)
   piharness skill show <name>       Show a proposal's SKILL.md draft
@@ -298,6 +321,46 @@ function builtinExtensions(cwd: string): BuiltinResult & { agentDir: string } {
 
 // ─── One-shot task execution ───────────────────────────────────────────────────
 
+/** One-line description of a tool call, for evidence (path or command). */
+function describeCall(args: unknown): string {
+  if (!args || typeof args !== "object") return "";
+  const a = args as Record<string, unknown>;
+  for (const key of ["command", "path", "file_path", "filePath", "pattern", "url", "query"]) {
+    const v = a[key];
+    if (typeof v === "string" && v.trim()) return v.replace(/\s+/g, " ").trim().slice(0, 160);
+  }
+  try {
+    const json = JSON.stringify(a);
+    return json === "{}" ? "" : json.slice(0, 160);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Record a one-shot run as transcript blocks so the learning loop sees exactly
+ * what the interactive TUI would have seen.
+ */
+function recordRun(session: HarnessSession, goal: string): TranscriptBlock[] {
+  const blocks: TranscriptBlock[] = [{ kind: "user", text: goal }];
+  const byId = new Map<string, number>();
+  session.subscribe((event) => {
+    if (event.type === "tool_start") {
+      byId.set(event.toolCallId, blocks.length);
+      blocks.push({ kind: "tool", name: event.toolName, detail: describeCall(event.args), status: "running", output: [], truncated: false });
+      return;
+    }
+    if (event.type === "tool_end") {
+      const at = byId.get(event.toolCallId);
+      if (at === undefined) return;
+      const block = blocks[at];
+      if (block.kind !== "tool") return;
+      block.status = event.isError ? "error" : "ok";
+    }
+  });
+  return blocks;
+}
+
 async function runTask(config: HarnessConfig, task: string): Promise<void> {
   console.error(`\x1b[90mTask: ${task}\x1b[0m`);
   console.error(`\x1b[90mModel: ${config.provider}/${config.model}\x1b[0m`);
@@ -313,6 +376,7 @@ async function runTask(config: HarnessConfig, task: string): Promise<void> {
 
   const handler = createStreamHandler(true);
   const unsub = session.subscribe(handler);
+  const evidenceBlocks = recordRun(session, task);
 
   // Cancellation
   const onSigint = () => {
@@ -337,6 +401,7 @@ async function runTask(config: HarnessConfig, task: string): Promise<void> {
     if (lastText) {
       console.error(`\n\x1b[32mFinal response:\x1b[0m\n${lastText}`);
     }
+    reportLearning(config.cwd, evidenceBlocks);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`\n\x1b[31mTask failed: ${msg}\x1b[0m`);
@@ -497,7 +562,7 @@ async function runInteractive(config: HarnessConfig, plain = false): Promise<voi
     harnessExtensions: ext.extensions,
   });
   try {
-    await runTui({
+    const blocks = await runTui({
       session,
       provider: config.provider,
       model: config.model,
@@ -507,8 +572,31 @@ async function runInteractive(config: HarnessConfig, plain = false): Promise<voi
       toolNames: ext.toolNames,
       extensionInfo: () => session.getExtensionInfo(),
     });
+    reportLearning(config.cwd, blocks);
   } finally {
     session.dispose();
+  }
+}
+
+/**
+ * Learning after a session: derive evidence from what really happened, then
+ * propose / reinforce / promote. Never throws into the caller — a broken
+ * learning step must not turn a good session into a failed one.
+ */
+function reportLearning(cwd: string, blocks: TranscriptBlock[]): void {
+  if (process.env.PIHARNESS_NO_LEARN === "1") return;
+  try {
+    const evidence = deriveEvidence(blocks, { cwd });
+    if (!evidence) return;
+    const result = learnFromSession(cwd, evidence, {
+      autoPromote: process.env.PIHARNESS_AUTO_PROMOTE !== "0",
+      minEvidence: Number(process.env.PIHARNESS_MIN_EVIDENCE ?? DEFAULT_MIN_EVIDENCE),
+    });
+    if (result.action === "none") return;
+    const icon = result.action === "promoted" ? "★" : "◇";
+    console.error(`\x1b[33m${icon} learn: ${result.action} ${result.name}\x1b[0m — ${result.reason}`);
+  } catch (err) {
+    console.error(`\x1b[90mlearn: skipped (${err instanceof Error ? err.message : String(err)})\x1b[0m`);
   }
 }
 
@@ -806,6 +894,48 @@ async function runEval(config: HarnessConfig, args: CliArgs): Promise<void> {
       process.exit(1);
     }
     throw e;
+  }
+}
+
+/**
+ * `piharness learn` — mine stored sessions that no proposal has claimed yet.
+ * `list` shows what has been learned and how much evidence stands behind it.
+ */
+function runLearn(config: HarnessConfig, args: CliArgs): void {
+  const sub = args.task;
+  if (sub === "list") {
+    const proposals = listProposals(config.cwd);
+    if (proposals.length === 0) {
+      console.log("No skill proposals yet. Run a session that changes files and verifies them, then: piharness learn");
+      return;
+    }
+    for (const p of proposals) {
+      const count = p.evidenceCount ?? p.evidenceSessions?.length ?? 0;
+      const mark = p.status === "approved" ? "approved" : p.status === "rejected" ? "rejected" : "proposed";
+      const auto = p.autoPromoted ? " · auto" : "";
+      console.log(`${p.name}  [${mark}${auto}]  evidence=${count}  ${p.verifyCommands.join(", ") || "no verify"}`);
+    }
+    return;
+  }
+
+  const sessionId = sub && sub !== "all" ? sub : undefined;
+  const all = sessionId ? [loadEvidence(config.cwd, sessionId)].filter((e): e is NonNullable<typeof e> => Boolean(e)) : listEvidence(config.cwd);
+  if (sessionId && all.length === 0) {
+    console.error(`No stored session "${sessionId}" (see .harness/state/sessions/)`);
+    process.exit(1);
+  }
+  const claimed = new Set(listProposals(config.cwd).flatMap((p) => p.evidenceSessions ?? []));
+  const pending = all.filter((e) => !claimed.has(e.id));
+  if (pending.length === 0) {
+    console.log(all.length === 0 ? "No sessions recorded yet." : "Nothing new to learn: every stored session already has a proposal.");
+    return;
+  }
+  const autoPromote = !args.noPromote;
+  const minEvidence = Number(args.minEvidence ?? process.env.PIHARNESS_MIN_EVIDENCE ?? 2);
+  for (const evidence of pending) {
+    const r = learnFromSession(config.cwd, evidence, { autoPromote, minEvidence, dryRun: args.dryRun });
+    const goal = evidence.goals[0] ?? evidence.id;
+    console.log(`${r.action.padEnd(10)} ${r.name ?? "-"}  ${r.reason}  — ${goal.slice(0, 60)}`);
   }
 }
 
@@ -1160,6 +1290,9 @@ async function main(): Promise<void> {
       break;
     case "todo":
       runTodo(config, args);
+      break;
+    case "learn":
+      runLearn(config, args);
       break;
     case "skill":
       runSkill(config, args);

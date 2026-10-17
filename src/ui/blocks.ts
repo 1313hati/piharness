@@ -259,19 +259,21 @@ export function renderStatus(info: StatusInfo, width: number, p: Palette): strin
   const sep = fg(p.muted, "  ·  ");
   const hint = fg(p.muted, info.hint);
 
-  // Segments in priority order: the right-hand hint and the essentials always
-  // fit; the meters are dropped from the right (least useful first) when the
-  // terminal is narrow, instead of wrapping the status line.
-  const optional = [info.gpu, info.context, info.rate, `tokens ${info.tokens}`].filter(
+  // Segments in priority order, most useful first: generation speed is the
+  // meter people actually watch, GPU is the first thing to go when the
+  // terminal is narrow. Rate is never dropped — it is the one number this
+  // footer exists for.
+  const optional = [info.rate, info.context, `tokens ${info.tokens}`, info.gpu].filter(
     (s): s is string => typeof s === "string" && s.length > 0,
   );
+  const pinned = info.rate && info.rate.length > 0 ? 1 : 0;
   const base = [`${dot} ${info.busy ? "working" : "ready"}`, `tools ${info.toolCalls}`,
     `${(info.elapsedMs / 1000).toFixed(1)}s`];
 
   const build = (segments: string[]) => [base[0], base[1], ...segments, base[2]].join(sep);
   let segments = [...optional];
   let left = build(segments);
-  while (visibleWidth(left) + visibleWidth(hint) + 3 > width && segments.length > 0) {
+  while (visibleWidth(left) + visibleWidth(hint) + 3 > width && segments.length > pinned) {
     segments = segments.slice(0, -1);
     left = build(segments);
   }

@@ -51,6 +51,8 @@ import {
 } from "./stats.js";
 import { startGpuSampler } from "./gpu.js";
 import { addTodo, completeTodo, loadTodos, removeTodo, renderTodos } from "../extensions/todo.js";
+import { deriveEvidence } from "../learn/evidence.js";
+import { DEFAULT_MIN_EVIDENCE, learnFromSession } from "../learn/mine.js";
 import { addFact, globalMemoryPath, loadMemoryFile, memoryPath, renderFacts } from "../context/memory.js";
 
 export interface TuiOptions {
@@ -127,7 +129,7 @@ class HarnessEditor extends Editor {
   }
 }
 
-export async function runTui(options: TuiOptions): Promise<void> {
+export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
   const palette = options.palette ?? BLACK_ORANGE;
   maybeDisableForPipe(Boolean(process.stdout.isTTY));
   setColorEnabled(!process.env.NO_COLOR && process.stdout.isTTY !== false);
@@ -256,6 +258,9 @@ export async function runTui(options: TuiOptions): Promise<void> {
         beginTurn();
         break;
       case "thinking_delta": {
+        // Thinking tokens count towards t/s: with a reasoning model most of
+        // the generation happens here, and ignoring it made the meter idle.
+        meter.delta(event.text);
         if (!turn) break;
         if (turn.thinkingIndex === null) {
           turn.thinkingIndex = push({ kind: "thinking", text: event.text });
@@ -348,7 +353,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
         return;
       case "/help":
         notice(
-          "/help  /status  /stats  /compact [notes]  /todos  /memory  /extensions  /clear  /model  /quit\n" +
+          "/help  /status  /stats  /compact [notes]  /todos  /memory  /learn  /extensions  /clear  /model  /quit\n" +
             "Enter sends · Ctrl+C cancels a running task · /todos add <text> · /memory add <fact>",
         );
         return;
@@ -402,6 +407,24 @@ export async function runTui(options: TuiOptions): Promise<void> {
         return handleTodos(input.slice("/todos".length).trim());
       case "/memory":
         return handleMemory(input.slice("/memory".length).trim());
+      case "/learn": {
+        const evidence = deriveEvidence(transcript.blocks, { cwd: options.cwd });
+        if (!evidence) {
+          notice("nothing to learn yet: this session has not called a tool");
+          break;
+        }
+        const result = learnFromSession(options.cwd, evidence, {
+          autoPromote: process.env.PIHARNESS_AUTO_PROMOTE !== "0",
+          minEvidence: Number(process.env.PIHARNESS_MIN_EVIDENCE ?? DEFAULT_MIN_EVIDENCE),
+        });
+        notice(
+          result.action === "none"
+            ? `not learned: ${result.reason}`
+            : `${result.action}: ${result.name} — ${result.reason}`,
+          result.action === "promoted" ? "ok" : "info",
+        );
+        break;
+      }
       case "/extensions": {
         const info = options.extensionInfo?.();
         notice(`tools: ${options.toolNames?.join(", ") ?? "none"}`);
@@ -550,6 +573,8 @@ export async function runTui(options: TuiOptions): Promise<void> {
   tui.requestRender();
 
   await closedPromise;
+  // The caller may want the transcript for the learning loop.
+  return transcript.blocks;
 }
 
 // ─── event payload summarising ──────────────────────────────────────────────

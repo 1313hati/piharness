@@ -17,8 +17,14 @@ test("stats: StreamMeter estimates live, then prefers the exact rate", () => {
   // 800 chars ≈ 200 tokens over 1s
   assert.equal(Math.round(m.rate(2_000)!), 200);
 
+  // Streamed text is the decode measurement; provider output tokens exclude
+  // thinking, so they are only a fallback (see StreamMeter.rate).
   m.finish(42, 2_000);
-  assert.equal(m.rate(2_000), 21);
+  assert.equal(Math.round(m.rate(2_000)!), 200);
+
+  const fallback = new StreamMeter();
+  fallback.finish(42, 2_000);
+  assert.equal(fallback.rate(2_000), 21);
 
   m.reset();
   assert.equal(m.rate(3_000), null);
@@ -84,6 +90,11 @@ test("status line: meters show up when there is room and drop first when narrow"
 
   const narrow = renderStatus(base, 60, BLACK_ORANGE)[0];
   assert.doesNotMatch(narrow, /gpu 87%/, "gpu is the first meter dropped");
+  assert.match(narrow, /12\.3 t\/s/, "generation speed survives a narrow terminal");
   assert.match(narrow, /ready/);
   assert.match(narrow, /\/help/);
+
+  // Even at 40 columns the rate stays: it is why the footer exists.
+  const tiny = renderStatus(base, 40, BLACK_ORANGE)[0];
+  assert.match(tiny, /t\/s/);
 });

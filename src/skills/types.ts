@@ -42,6 +42,18 @@ export interface SkillProposal {
   updatedAt: string;
   evalResult?: EvalResult;
   approvedAt?: string;
+  /**
+   * Stable hash of (verify commands + effective tool sequence). Two sessions
+   * that solved a problem the same way share a signature, so the second one
+   * reinforces the draft instead of cloning it.
+   */
+  signature?: string;
+  /** Session ids that produced this draft (evidence trail). */
+  evidenceSessions?: string[];
+  /** Number of independent sessions behind the draft. */
+  evidenceCount?: number;
+  /** True when the learning loop promoted it without a human in the loop. */
+  autoPromoted?: boolean;
 }
 
 export class SkillError extends Error {
