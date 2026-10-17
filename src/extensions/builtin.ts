@@ -15,7 +15,7 @@ import {
   addFactToFile, globalMemoryPath, loadMemoryFile, memoryPath, removeFactFromFile, renderFacts, searchFacts,
 } from "../context/memory.js";
 import { fetchPage, searchWeb, WebError } from "./web.js";
-import { buildRepoMap, outlineFile, renderRepoMap } from "./code.js";
+import { buildRepoMap, findCode, outlineFile, renderFindHits, renderRepoMap } from "./code.js";
 
 export interface BuiltinDeps {
   cwd: string;
@@ -215,6 +215,38 @@ function outlineTool(deps: BuiltinDeps): HarnessTool {
   });
 }
 
+function codeFindTool(deps: BuiltinDeps): HarnessTool {
+  return defineTool({
+    name: "code_find",
+    label: "Find code",
+    description:
+      "Locate code by name before reading anything: `def` where a symbol is declared, `ref` where it is used, `text` for a raw substring. " +
+      "Returns file:line hits. Use it instead of guessing a path or reading a whole file to find one function.",
+    promptSnippet: "code_find — definitions and references with file:line",
+    parameters: Type.Object({
+      query: Type.String({ description: "symbol name, or text to look for" }),
+      mode: Type.Optional(Type.String({ description: "def (default) | ref | text" })),
+      subdir: Type.Optional(Type.String({ description: "limit the scan to a subdirectory" })),
+      limit: Type.Optional(Type.Number({ description: "max hits, default 40" })),
+    }),
+    async execute({ query, mode, subdir, limit }) {
+      const found = mode === "ref" || mode === "text" ? mode : "def";
+      try {
+        const hits = findCode(deps.cwd, query, { mode: found, subdir, limit });
+        if (hits.length === 0) {
+          return { text: `${renderFindHits(hits, found)} — try mode "text" or a shorter query`, details: { hits: 0 } };
+        }
+        return {
+          text: `${hits.length} ${found === "def" ? "definition(s)" : "hit(s)"} for ${query}\n${renderFindHits(hits, found)}`,
+          details: { hits: hits.length, mode: found },
+        };
+      } catch (e) {
+        return { text: `code_find failed: ${(e as Error).message}`, isError: true };
+      }
+    },
+  });
+}
+
 function repoMapTool(deps: BuiltinDeps): HarnessTool {
   return defineTool({
     name: "repo_map",
@@ -284,6 +316,7 @@ export function createBuiltinExtensions(deps: BuiltinDeps): BuiltinResult {
   const webFetch = webFetchTool(deps);
   const outline = outlineTool(deps);
   const repoMap = repoMapTool(deps);
+  const codeFind = codeFindTool(deps);
 
   const extensions: HarnessExtension[] = [
     {
@@ -304,7 +337,7 @@ export function createBuiltinExtensions(deps: BuiltinDeps): BuiltinResult {
     {
       name: "code-nav",
       description: "Symbol outlines and bounded repo maps for navigation",
-      tools: [outline, repoMap],
+      tools: [outline, repoMap, codeFind],
     },
   ];
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { previewFromArgs, summarizeArgs, summarizeResult } from "../src/ui/app.js";
+import { interruptIntent, previewFromArgs, summarizeArgs, summarizeResult } from "../src/ui/app.js";
 import {
   breakLines,
   renderAssistantText,
@@ -192,4 +192,23 @@ test("thinkingHead and thinkingLine render in transcript order, never over width
   const answerIdx = plain.findIndex((l) => l.includes("answer"));
   assert.ok(head >= 0 && lineIdx > head && answerIdx > lineIdx, plain.join("|"));
   for (const l of out) assert.ok(visibleWidth(l) <= 40);
+});
+
+test("interruptIntent: Ctrl+C cancels in every terminal encoding", () => {
+  assert.equal(interruptIntent("\x03"), "cancel");
+  // Kitty keyboard protocol: CSI 99;5u (codepoint 'c', ctrl modifier).
+  assert.equal(interruptIntent("\x1b[99;5u"), "cancel");
+  // modifyOtherKeys fallback: CSI 27;5;99~.
+  assert.equal(interruptIntent("\x1b[27;5;99~"), "cancel");
+});
+
+test("interruptIntent: Ctrl+Z quits", () => {
+  assert.equal(interruptIntent("\x1a"), "quit");
+  assert.equal(interruptIntent("\x1b[122;5u"), "quit");
+});
+
+test("interruptIntent: ordinary keys are left to the editor", () => {
+  for (const key of ["a", " ", "\r", "\x1b[A", "/quit"]) {
+    assert.equal(interruptIntent(key), null);
+  }
 });

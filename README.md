@@ -81,6 +81,51 @@ one small adapter (`src/pi/extensions.ts`). Pi extension modules dropped into
   editing, smallest diff, run the tests/build after changes, split long files
   into write-then-append, fix the cause the error names, no placeholder code.
 
+## Finding code instead of guessing
+
+`code_find` answers "which file, which line" before anything is read:
+
+    code_find("loadLevel")              # definitions, exact name first
+    code_find("loadLevel", mode="ref")  # call sites, declarations excluded
+    code_find("flagpole", mode="text")  # raw substring
+
+Results are `path:line` with the kind (`function`, `class`, `method`, `use`).
+Code hits rank above hits inside comments, and the index is invalidated the
+moment a file tool writes, so a stale answer cannot outlive an edit. The
+symbol parser only accepts methods inside a class body — a map full of
+`method if@42` teaches you to ignore it.
+
+The first turn of a session also carries a workspace map: up to forty files with
+their top symbols, ordered by substance (an engine file before a scratch
+script), capped at ~6 kB. That is one block of context instead of five
+exploratory reads before the first edit.
+
+## When it starts going in circles
+
+Three counts, watched while the turn runs:
+
+- the same file edited three times with no check in between,
+- the same command run three times with the same arguments,
+- four probe calls with no check.
+
+When one trips, the harness appends a short block to the next provider request —
+"LOOP: 4 edits to game.js and no check has run since. Write one trace harness…"
+— not after the turn ends, because a correction that arrives after the failure
+is a post-mortem. A successful check (`npm test`, `tsc`, `cargo test`, …) clears
+the evidence; reads and searches never count against you, and there is a
+five-call cooldown so it cannot become noise.
+
+## Keys
+
+- `Ctrl+C` cancels the running turn; when idle, press twice to quit.
+- `Ctrl+Z` quits (aborting a live turn first, then restoring the terminal).
+- `/quit` from the prompt does the same thing.
+
+All three encodings are handled — plain `\x03`, the Kitty keyboard protocol
+(`CSI 99;5u`) and `modifyOtherKeys` (`CSI 27;5;99~`) — plus a raw stdin listener
+and SIGINT/SIGTSTP handlers, because a key that only works when the editor
+happens to have focus is a key that appears broken.
+
 ## Skills that apply everywhere
 
 A skill is a short procedure — the moves that worked, the traps that cost a

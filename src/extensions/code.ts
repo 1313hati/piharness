@@ -82,8 +82,24 @@ export function outlineSource(source: string, filename: string): SymbolInfo[] {
     patterns = [];
   }
 
+  // A method is only a method inside a class body. Without that check the
+  // permissive `name(...) {` pattern reports `if (...) {` and `for (...) {` as
+  // methods, and a map full of `method if@42` teaches the reader to ignore it.
+  const JS_KEYWORDS = new Set([
+    "if", "for", "while", "switch", "catch", "return", "else", "do", "try", "finally",
+    "function", "catch", "with", "typeof", "new", "await", "yield", "case", "default",
+  ]);
+  let braceDepth = 0;
+  let classDepth: number | null = null;
+
   lines.forEach((line, i) => {
     const lineNo = i + 1;
+    const opens = (line.match(/\{/g) ?? []).length;
+    const closes = (line.match(/\}/g) ?? []).length;
+    const depthBefore = braceDepth;
+    if (/\bclass\s+[A-Za-z_]\w*/.test(line)) classDepth = depthBefore;
+    braceDepth = Math.max(0, braceDepth + opens - closes);
+    if (classDepth !== null && braceDepth <= classDepth && closes > 0 && opens === 0) classDepth = null;
     if (ext === ".md" || ext === ".mdx") {
       const m = /^(#{1,4})\s+(.+?)\s*$/.exec(line);
       if (m) push(`h${m[1].length}`, m[2], lineNo);
@@ -100,7 +116,9 @@ export function outlineSource(source: string, filename: string): SymbolInfo[] {
     }
     if (isJsLike) {
       const m = methodRe.exec(line);
-      if (m && m[1].length >= 2) push("method", m[2], lineNo);
+      if (m && m[1].length >= 2 && classDepth !== null && depthBefore === classDepth + 1) {
+        if (!JS_KEYWORDS.has(m[2])) push("method", m[2], lineNo);
+      }
     }
   });
   return out;
@@ -166,7 +184,9 @@ export function buildRepoMap(cwd: string, opts: RepoMapOptions = {}): RepoMapEnt
       try {
         const source = readFileSync(join(root, rel), "utf-8");
         entry.lines = source.split("\n").length;
-        entry.symbols = outlineSource(source, rel).slice(0, opts.maxSymbolsPerFile ?? 6);
+        // Keep the full outline: the kind filter and the per-file cap belong at
+        // render time, otherwise six leading `const`s hide every function.
+        entry.symbols = outlineSource(source, rel).slice(0, 200);
       } catch {
         // unreadable file: keep path only
       }
@@ -174,7 +194,11 @@ export function buildRepoMap(cwd: string, opts: RepoMapOptions = {}): RepoMapEnt
     entries.push(entry);
     if (entries.length >= maxFiles) break;
   }
-  return entries;
+  // A map is only useful if the substantive files come first: a scratch script
+  // with four `const` lines must not push the engine out of the budget.
+  const score = (e: RepoMapEntry) =>
+    e.symbols.reduce((n, s) => n + (s.kind === "const" || s.kind === "variable" ? 0.25 : 1), 0);
+  return entries.sort((a, b) => score(b) - score(a) || a.path.localeCompare(b.path));
 }
 
 /** Render a repo map as compact text. */
@@ -183,7 +207,11 @@ export function renderRepoMap(entries: RepoMapEntry[]): string {
     .map((e) => {
       const head = e.lines !== undefined ? `${e.path} (${e.lines} lines)` : e.path;
       if (e.symbols.length === 0) return head;
-      const syms = e.symbols.map((s) => `${s.kind} ${s.name}@${s.line}`).join(", ");
+      // Declarations carry the shape of a file; top-level constants are mostly
+      // configuration noise, so they are only shown when nothing else exists.
+      const meaningful = e.symbols.filter((s) => s.kind !== "const" && s.kind !== "variable");
+      const shown = (meaningful.length > 0 ? meaningful : e.symbols).slice(0, e.symbols.length > 0 ? 6 : 0);
+      const syms = shown.map((s) => `${s.kind} ${s.name}@${s.line}`).join(", ");
       return `${head}\n    ${syms}`;
     })
     .join("\n");
@@ -201,4 +229,144 @@ export function outlineFile(cwd: string, relPath: string, filter?: string): { pa
     symbols = symbols.filter((s) => s.name.toLowerCase().includes(f));
   }
   return { path: relative(root, full), symbols, lines: source.split("\n").length };
+}
+
+// ─── Locate: definitions and references ──────────────────────────────────────
+
+export type FindMode = "def" | "ref" | "text";
+
+export interface FindHit {
+  path: string;
+  line: number;
+  kind: string;
+  name: string;
+  /** 1 for an exact name, 2 for a prefix, 3 for a substring. */
+  rank: number;
+  /** Trimmed source line, for `ref` and `text` hits. */
+  snippet?: string;
+}
+
+export interface FindOptions {
+  mode?: FindMode;
+  /** Limit the scan to a subdirectory (relative to the workspace). */
+  subdir?: string;
+  limit?: number;
+  maxFiles?: number;
+}
+
+interface IndexedFile {
+  path: string;
+  symbols: SymbolInfo[];
+}
+
+interface CacheEntry {
+  at: number;
+  files: IndexedFile[];
+}
+
+const CACHE_TTL_MS = 3_000;
+const cache = new Map<string, CacheEntry>();
+
+function indexOf(root: string, subdir: string | undefined, maxFiles: number): IndexedFile[] {
+  const key = `${root}::${subdir ?? ""}::${maxFiles}`;
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.files;
+
+  const paths: string[] = [];
+  walk(root, subdir ? resolve(root, subdir) : root, 0, 8, paths, { n: MAX_SCAN_ENTRIES });
+  const files: IndexedFile[] = [];
+  for (const rel of paths) {
+    if (!CODE_EXT.has(extname(rel).toLowerCase())) continue;
+    try {
+      const source = readFileSync(join(root, rel), "utf-8");
+      files.push({ path: rel, symbols: outlineSource(source, rel) });
+    } catch {
+      // unreadable: skip
+    }
+    if (files.length >= maxFiles) break;
+  }
+  cache.set(key, { at: Date.now(), files });
+  return files;
+}
+
+/** Forget the index; called when a file tool reports a write. */
+export function invalidateCodeIndex(): void {
+  cache.clear();
+}
+
+/**
+ * Find where a name is defined or used. Cheap enough to call before reading
+ * anything: it answers "which file, which line" without an LSP.
+ */
+export function findCode(cwd: string, query: string, opts: FindOptions = {}): FindHit[] {
+  const root = resolve(cwd);
+  const mode = opts.mode ?? "def";
+  const needle = query.trim();
+  if (!needle) return [];
+  const limit = Math.min(Math.max(opts.limit ?? 40, 1), 200);
+  const maxFiles = Math.min(Math.max(opts.maxFiles ?? 400, 1), MAX_SCAN_ENTRIES);
+
+  if (mode === "def") {
+    const files = indexOf(root, opts.subdir, maxFiles);
+    const hits: FindHit[] = [];
+    for (const file of files) {
+      for (const sym of file.symbols) {
+        if (sym.name === needle) hits.push({ path: file.path, line: sym.line, kind: sym.kind, name: sym.name, rank: 1 });
+        else if (sym.name.startsWith(needle)) hits.push({ path: file.path, line: sym.line, kind: sym.kind, name: sym.name, rank: 2 });
+        else if (sym.name.toLowerCase().includes(needle.toLowerCase())) hits.push({ path: file.path, line: sym.line, kind: sym.kind, name: sym.name, rank: 3 });
+      }
+    }
+    return hits.sort((a, b) => a.rank - b.rank || a.path.localeCompare(b.path) || a.line - b.line).slice(0, limit);
+  }
+
+  // ref/text: search the text of candidate files, skipping the definition of
+  // an exact symbol in `ref` mode (a caller and a declaration are different
+  // answers, and mixing them is how "who calls this" turns into noise).
+  const files = indexOf(root, opts.subdir, maxFiles);
+  const word = new RegExp(`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+  const hits: FindHit[] = [];
+  for (const file of files) {
+    let source: string;
+    try {
+      source = readFileSync(join(root, file.path), "utf-8");
+    } catch {
+      continue;
+    }
+    const lines = source.split("\n");
+    const defLines = new Set(file.symbols.filter((s) => s.name === needle).map((s) => s.line));
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      const matched = mode === "ref" ? word.test(line) : line.includes(needle);
+      if (!matched) continue;
+      if (mode === "ref" && defLines.has(i + 1)) continue;
+      const trimmed = line.trim();
+      const comment = /^(\/\/|\/\*|\*|#|--|;;)/.test(trimmed);
+      hits.push({
+        path: file.path,
+        line: i + 1,
+        kind: comment ? "comment" : "use",
+        name: needle,
+        rank: comment ? 3 : 1,
+        snippet: trimmed.slice(0, 140),
+      });
+      if (hits.length >= limit * 4) break;
+    }
+    if (hits.length >= limit * 4) break;
+  }
+  // Code first; a mention inside a comment explains intent but is not a call
+  // site, and burying three real callers under a docstring is how navigation
+  // stops saving time.
+  return hits.sort((a, b) => a.rank - b.rank).slice(0, limit);
+}
+
+/** Render find hits compactly: `path:line  kind name  — snippet`. */
+export function renderFindHits(hits: FindHit[], mode: FindMode): string {
+  if (hits.length === 0) return mode === "def" ? "no definition found" : "no matches found";
+  return hits
+    .map((h) => {
+      const where = `${h.path}:${h.line}`;
+      const head = mode === "def" ? `${where}  ${h.kind} ${h.name}` : `${where}  ${h.snippet ?? ""}`;
+      return head.trimEnd();
+    })
+    .join("\n");
 }

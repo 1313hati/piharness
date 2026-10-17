@@ -15,7 +15,7 @@ test("extensions: built-ins expose the documented tools exactly once", () => {
   const root = scratch();
   try {
     const built = createBuiltinExtensions({ cwd: root, agentDir: join(root, "agent") });
-    assert.deepEqual(built.toolNames, ["todo", "memory", "web_search", "web_fetch", "outline", "repo_map"]);
+    assert.deepEqual(built.toolNames, ["todo", "memory", "web_search", "web_fetch", "outline", "repo_map", "code_find"]);
     assert.equal(new Set(built.toolNames).size, built.toolNames.length);
     assert.deepEqual(built.extensions.map((e) => e.name), ["todos", "memory", "web", "code-nav"]);
   } finally {

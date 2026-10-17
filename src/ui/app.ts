@@ -30,6 +30,7 @@ import {
   TuiMainScreen,
   type Component,
   VStack,
+  matchesKey,
 } from "@earendil-works/pi-tui";
 import type { HarnessSession, NormalizedEvent, ThinkingLevel } from "../pi/session.js";
 import {
@@ -148,13 +149,33 @@ const VERSION = (() => {
  */
 class HarnessEditor extends Editor {
   onInterrupt?: () => void;
+  onQuit?: () => void;
   override handleInput(data: string): void {
-    if (data === "\x03") {
+    const intent = interruptIntent(data);
+    if (intent === "cancel") {
       this.onInterrupt?.();
+      return;
+    }
+    if (intent === "quit") {
+      this.onQuit?.();
       return;
     }
     super.handleInput(data);
   }
+}
+
+/**
+ * What a keypress means, across every encoding a terminal may use for it.
+ *
+ * A raw `\x03` comparison is not enough: with the Kitty keyboard protocol or
+ * modifyOtherKeys enabled, Ctrl+C arrives as an escape sequence (`CSI 99;5u`),
+ * which used to fall through to the editor as junk — the reason Ctrl+C looked
+ * dead while a turn was running.
+ */
+export function interruptIntent(data: string): "cancel" | "quit" | null {
+  if (matchesKey(data, "ctrl+c")) return "cancel";
+  if (matchesKey(data, "ctrl+z")) return "quit";
+  return null;
 }
 
 export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
@@ -236,7 +257,7 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
       toolCalls: stats.toolCalls,
       tokens: stats.tokens.total,
       elapsedMs,
-      hint: turn ? "ctrl+c cancels" : HINT,
+      hint: turn ? "ctrl+c cancels · ctrl+z quits" : HINT,
       rate: formatRate(meter.rate()),
       context: formatContext(contextInfo()),
       gpu: formatGpu(gpuInfo),
@@ -459,6 +480,9 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
     clearLiveState(options.agentDir ?? defaultAgentDir(), process.pid);
     setTitle("piharness");
     unsub();
+    process.stdin.off("data", onStdinData);
+    process.off("SIGINT", onSigint);
+    process.off("SIGTSTP", onSigtstp);
     tui.stop();
     resolveClosed();
   };
@@ -674,7 +698,26 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
   };
 
   // Ctrl+C: cancel while busy; otherwise a second press within 1.5s quits.
-  editor.onInterrupt = () => {
+  // Ctrl+Z: quit outright (aborting a live turn first, so the server stops
+  // decoding and the terminal is restored by close()).
+  //
+  // Three delivery paths reach this on purpose: the focused editor (normal),
+  // a raw stdin listener (focus lost or a modal component swallowing input)
+  // and the process signals (a terminal that still has ISIG on). They all pass
+  // through `handleIntent`, which debounces, so one keypress acts once.
+  let lastIntentAt = 0;
+  const handleIntent = (intent: "cancel" | "quit") => {
+    const now = Date.now();
+    if (now - lastIntentAt < 60) return;
+    lastIntentAt = now;
+    if (intent === "quit") {
+      if (turn) {
+        endTurn(true);
+        void options.session.abort().catch(() => {});
+      }
+      close();
+      return;
+    }
     if (turn) {
       // End the turn in the UI immediately: pi's abort() cancels the HTTP
       // request, but llama.cpp keeps decoding for a while and the agent_end
@@ -684,14 +727,26 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
       void options.session.abort().catch(() => {});
       return;
     }
-    const now = Date.now();
-    if (now - lastCtrlC < 1500) {
+    const now2 = Date.now();
+    if (now2 - lastCtrlC < 1500) {
       close();
       return;
     }
-    lastCtrlC = now;
-    notice("press Ctrl+C again to quit, or type /quit");
+    lastCtrlC = now2;
+    notice("press Ctrl+C again to quit, Ctrl+Z quits now, or type /quit");
   };
+  editor.onInterrupt = () => handleIntent("cancel");
+  editor.onQuit = () => handleIntent("quit");
+
+  const onStdinData = (chunk: Buffer | string) => {
+    const intent = interruptIntent(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+    if (intent) handleIntent(intent);
+  };
+  const onSigint = () => handleIntent("cancel");
+  const onSigtstp = () => handleIntent("quit");
+  process.stdin.on("data", onStdinData);
+  process.on("SIGINT", onSigint);
+  process.on("SIGTSTP", onSigtstp);
 
   const settings = loadSettings(options.agentDir ?? defaultAgentDir());
 

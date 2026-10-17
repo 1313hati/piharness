@@ -9,6 +9,8 @@
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { buildSkillsBlock } from "../context/index.js";
+import { FlailGuard, renderFlailNudge } from "../quality/flail.js";
+import { buildRepoMap, invalidateCodeIndex, renderRepoMap } from "../extensions/code.js";
 import { renderHarnessContext } from "../extensions/builtin.js";
 import { clampText, type HarnessExtension, type HarnessTool } from "../extensions/types.js";
 
@@ -73,8 +75,66 @@ export function harnessInlineExtensions(
         for (const tool of tools) {
           pi.registerTool(toPiTool(tool, deps));
         }
+        // Watches the tool stream for loops (same file edited again and again,
+        // the same call repeated, probes with no check) and says so before the
+        // next turn. Deterministic: it counts, it does not judge.
+        const flail = new FlailGuard();
+        const editsCode = new Set(["write", "edit", "patch", "apply_patch", "multiedit", "bash"]);
+        pi.on("tool_execution_start", (event) => {
+          flail.start(event.toolCallId, event.toolName, event.args);
+        });
+        pi.on("tool_execution_end", (event) => {
+          flail.end(event.toolCallId, event.isError);
+          // A file changed: the symbol index is stale from this moment, and a
+          // stale `code_find` is worse than no index at all.
+          if (!event.isError && editsCode.has(event.toolName)) invalidateCodeIndex();
+        });
+
+        // The first turn of a session starts with the layout of the workspace
+        // instead of five exploratory reads: file paths and their top symbols,
+        // bounded hard so it cannot crowd out the transcript.
+        let mapSeeded = false;
+
+        // Mid-turn is where a loop actually happens: one user message can run
+        // thirty tool calls. The `context` hook runs before every provider
+        // request, so the correction arrives while it can still change the
+        // next step, not after the turn has already ended.
+        pi.on("context", (event) => {
+          let nudge: ReturnType<FlailGuard["check"]> = null;
+          try {
+            nudge = flail.check();
+          } catch {
+            return undefined;
+          }
+          if (!nudge) return undefined;
+          const text = renderFlailNudge(nudge);
+          const tail = event.messages[event.messages.length - 1];
+          if (tail && JSON.stringify(tail).includes("Stuck detection")) return undefined;
+          const message = { role: "user", content: text, timestamp: Date.now() };
+          return { messages: [...event.messages, message as (typeof event.messages)[number]] };
+        });
+
         pi.on("before_agent_start", (event) => {
           const blocks: string[] = [renderHarnessContext(deps)];
+          try {
+            const nudge = flail.check();
+            if (nudge) blocks.push(renderFlailNudge(nudge));
+          } catch {
+            // detection is advisory: never block a turn
+          }
+          if (!mapSeeded) {
+            mapSeeded = true;
+            try {
+              const entries = buildRepoMap(deps.cwd, { maxFiles: 40, maxSymbolsPerFile: 4 });
+              const code = entries.filter((e) => e.symbols.length > 0);
+              if (code.length >= 2) {
+                const map = renderRepoMap(code).slice(0, 6000);
+                blocks.push(`### Workspace map (paths and top symbols; use code_find to locate more)\n${map}`);
+              }
+            } catch {
+              // an unreadable workspace is not an error worth failing a turn over
+            }
+          }
           // Approved skills are matched against what the user actually asked
           // for, every turn: a skill learned in another project is only useful
           // if it can be reached from the TUI, not just from `piharness run`.
