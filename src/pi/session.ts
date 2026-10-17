@@ -7,14 +7,18 @@
 
 import {
   createAgentSession,
+  DefaultResourceLoader,
   ModelRuntime,
   type AgentSession,
   type AgentSessionEvent,
   type AgentSessionEventListener,
   type CreateAgentSessionResult,
 } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ensureAgentDir } from "./agent-dir.js";
+import { harnessInlineExtensions } from "./extensions.js";
+import type { HarnessExtension } from "../extensions/types.js";
 
 // ─── Normalized event types (our interface) ───────────────────────────────────
 
@@ -55,10 +59,32 @@ export interface HarnessSession {
     toolCalls: number;
     tokens: { input: number; output: number; total: number };
   };
+  /** Manually compact the conversation into a summary. */
+  compact(customInstructions?: string): Promise<{ summary: string; tokensBefore: number; estimatedTokensAfter?: number }>;
+  /** Context-window usage as Pi estimates it for the next request. */
+  getContextUsage(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
+  /** Extension dirs/modules Pi loaded (built-ins are inline and unlisted). */
+  getExtensionInfo(): { paths: string[]; diagnostics: string[] };
   /** Subscribe to normalized events. Returns unsubscribe function. */
   subscribe(listener: NormalizedEventListener): () => void;
   /** Clean up resources. */
   dispose(): void;
+}
+
+/**
+ * Pi returns `tokens: null` right after a compaction (until the next request).
+ * Falling back to the last estimate keeps the footer honest instead of
+ * flashing "ctx ?/66k" for a whole turn.
+ */
+export function mergeContextUsage(
+  usage: { tokens: number | null; contextWindow: number; percent: number | null } | undefined,
+  lastKnownTokens: number | undefined,
+): { tokens: number | null; contextWindow: number; percent: number | null } | undefined {
+  if (!usage) return undefined;
+  if (typeof usage.tokens === "number") return usage;
+  if (lastKnownTokens === undefined) return usage;
+  const percent = usage.contextWindow > 0 ? (lastKnownTokens / usage.contextWindow) * 100 : null;
+  return { tokens: lastKnownTokens, contextWindow: usage.contextWindow, percent };
 }
 
 // ─── Session creation ──────────────────────────────────────────────────────────
@@ -78,7 +104,14 @@ export interface CreateSessionOptions {
   continueSession?: boolean;
   /** Harness-owned Pi agent dir (default: ~/.config/piharness/agent). */
   agentDir?: string;
+  /** Harness extensions to expose as tools + per-turn context. */
+  harnessExtensions?: HarnessExtension[];
+  /** Extra directories to load Pi extension modules from (in addition to the defaults). */
+  extensionPaths?: string[];
 }
+
+/** Built-in coding tools enabled by default. */
+export const DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 /**
  * Create a Pi agent session wrapped in our normalized interface.
@@ -106,16 +139,40 @@ export async function createHarnessSession(
     );
   }
 
+  // Extensions: our built-ins (inline factory) plus whatever the user drops in
+  // `.harness/extensions/` or `<agentDir>/extensions/` as Pi extension modules.
+  const inline = harnessInlineExtensions(opts.harnessExtensions ?? [], {
+    cwd: opts.cwd,
+    agentDir: agent.dir,
+  });
+  // Only hand Pi paths that exist: a missing dir is not a problem worth
+  // printing, it just means the user relies on built-ins only.
+  const extensionPaths = (opts.extensionPaths ?? [
+    join(opts.cwd, ".harness", "extensions"),
+    join(agent.dir, "extensions"),
+  ]).filter((p) => existsSync(p));
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: opts.cwd,
+    agentDir: agent.dir,
+    extensionFactories: inline,
+    additionalExtensionPaths: extensionPaths,
+  });
+  await resourceLoader.reload();
+
+  const extensionToolNames = (opts.harnessExtensions ?? []).flatMap((e) => e.tools.map((t) => t.name));
   const result: CreateAgentSessionResult = await createAgentSession({
     cwd: opts.cwd,
     agentDir: agent.dir,
     model,
     modelRuntime,
+    resourceLoader,
     thinkingLevel: (opts.thinkingLevel ?? "off") as any,
-    tools: opts.tools ?? ["read", "bash", "edit", "write"],
+    tools: [...(opts.tools ?? DEFAULT_TOOLS), ...extensionToolNames],
   });
 
   const piSession: AgentSession = result.session;
+  // Last context estimate we trust, so a compaction does not blank the meter.
+  let lastKnownTokens: number | undefined;
 
   // Track our listeners
   const listeners = new Set<NormalizedEventListener>();
@@ -173,6 +230,35 @@ export async function createHarnessSession(
           output: stats.tokens.output,
           total: stats.tokens.total,
         },
+      };
+    },
+
+    async compact(customInstructions?: string) {
+      const res = await piSession.compact(customInstructions);
+      // Pi reports `tokens: null` until the next request, which would make the
+      // footer flash "ctx ?" right after a compaction. Keep the estimate.
+      if (typeof res.estimatedTokensAfter === "number") lastKnownTokens = res.estimatedTokensAfter;
+      return {
+        summary: res.summary,
+        tokensBefore: res.tokensBefore,
+        estimatedTokensAfter: res.estimatedTokensAfter,
+      };
+    },
+
+    getContextUsage() {
+      const usage = piSession.getContextUsage();
+      if (usage && typeof usage.tokens === "number") lastKnownTokens = usage.tokens;
+      return mergeContextUsage(usage, lastKnownTokens);
+    },
+
+    getExtensionInfo() {
+      const loaded = resourceLoader.getExtensions();
+      return {
+        paths: loaded.extensions.map((e) => e.path),
+        diagnostics: [
+          ...loaded.errors.map((e) => `${e.path}: ${e.error}`),
+          ...(loaded.warnings ?? []).map((w) => `${w.path}: ${w.warning}`),
+        ],
       };
     },
 

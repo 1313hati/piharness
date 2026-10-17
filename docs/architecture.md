@@ -57,6 +57,58 @@ models.json, auth.json, sessions, settings. Exactly one file is ever read from
 Anything that needs to know how the agent works stays in `src/pi/session.ts`;
 the TUI sees only `NormalizedEvent`s and session stats.
 
+## Extension layer
+
+`src/extensions/` extends the agent without touching Pi internals. Tools are
+plain objects (`HarnessTool`: name, label, description, typebox parameters,
+`execute`), so they can be unit-tested and driven by any backend. Only
+`src/pi/extensions.ts` knows Pi exists: it registers each tool through
+`pi.registerTool` and hooks `before_agent_start` to append the per-turn
+context block. Because that hook runs before *every* turn, todos and memory
+are re-read each turn instead of being frozen at session start.
+
+| Extension | Tools | State | Notes |
+|---|---|---|---|
+| `todos` | `todo` (list/add/done/reopen/remove/clear_done) | `<repo>/.harness/todos.json` | Survives restarts; open items are injected into the prompt each turn |
+| `memory` | `memory` (remember/forget/recall/list) | `<repo>/.harness/memory.json`, `<agentDir>/memory.json` | Project vs global scope; facts are data, never instructions |
+| `web` | `web_search`, `web_fetch` | none | DuckDuckGo HTML by default, SearXNG via `PIHARNESS_SEARCH_URL`; no API key |
+| `code-nav` | `outline`, `repo_map` | none | Regex symbol outlines + bounded repo map; complements `grep`, no LSP required |
+
+Built-ins are always on. Pi extension modules dropped into
+`<repo>/.harness/extensions/` or `<agentDir>/extensions/` load alongside them
+via `additionalExtensionPaths`, and `/extensions` reports what actually loaded
+plus any loader diagnostics.
+
+Deliberately excluded from evaluation runs: extension tools change what the
+model can do, so the recorded benchmark numbers only stay comparable if eval
+sessions are built without them.
+
+## Compaction
+
+`/compact [notes]` wraps Pi's own compaction (`session.compact`), which
+summarizes the conversation into a compaction entry and keeps the recent tail.
+Pi refuses when the session is below its threshold ("Nothing to compact
+(session too small)") and when it was already compacted — both are surfaced
+verbatim instead of being papered over. Auto-compaction stays Pi's job
+(threshold/overflow, configured in the agent settings); the harness only shows
+`compaction_start`/`compaction_end` in the TUI and refreshes the context meter
+afterwards.
+
+## Runtime statistics
+
+`src/ui/stats.ts` owns the numbers, `src/ui/gpu.ts` owns the optional GPU
+probe; both are pure enough to test without a terminal.
+
+| Meter | Source | Honesty rule |
+|---|---|---|
+| t/s | streamed text (~4 chars/token) while generating; exact `usage.output_tokens / turn seconds` once the turn ends | streaming estimate is replaced by the exact rate, never mixed |
+| context | Pi's `getContextUsage()` (tokens, window, percent) | shows `?` when the window is unknown, not a fake number |
+| GPU | `nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu` sampled every 2.5s | segment omitted when no GPU/driver is present; the sampler stops itself instead of retrying forever |
+| tools/tokens/turn | Pi session stats | unchanged from previous milestones |
+
+The footer drops segments right-to-left (gpu → context → rate → tokens) when
+the terminal is narrow, so the status line never wraps.
+
 ## Configuration precedence
 
 CLI args → project `.harness/config.json` → user settings → defaults. Secrets live in environment variables or Pi's credential storage (`~/.pi/agent/auth.json`) — never in project config. Project config is untrusted until the workspace is trusted; no auto-loading of executable extensions from unfamiliar repos.

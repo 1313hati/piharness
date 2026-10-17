@@ -20,6 +20,12 @@ import { join } from "node:path";
 import { loadConfig, type HarnessConfig } from "./config.js";
 import { ensureAgentDir } from "./pi/agent-dir.js";
 import { createHarnessSession, type HarnessSession, type NormalizedEvent } from "./pi/session.js";
+import { createBuiltinExtensions, type BuiltinResult } from "./extensions/builtin.js";
+import {
+  addTodo, clearDoneTodos, completeTodo, loadTodos, removeTodo, reopenTodo, renderTodos,
+} from "./extensions/todo.js";
+import { globalMemoryPath, loadMemoryFile, memoryPath, renderFacts } from "./context/memory.js";
+import { formatContext, formatTokens } from "./ui/stats.js";
 import {
   runTask as controllerRunTask,
   formatStatus,
@@ -56,7 +62,7 @@ import {
 // ─── Argument parsing ──────────────────────────────────────────────────────────
 
 interface CliArgs {
-  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "skill" | "eval" | "doctor";
+  command: "interactive" | "run" | "task" | "resume" | "status" | "memory" | "todo" | "skill" | "eval" | "doctor";
   task?: string;
   /** Positional args after the first (e.g. the fact text in memory add). */
   extras: string[];
@@ -107,6 +113,9 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case "memory":
         result.command = "memory";
+        break;
+      case "todo":
+        result.command = "todo";
         break;
       case "skill":
         result.command = "skill";
@@ -163,9 +172,9 @@ function parseArgs(argv: string[]): CliArgs {
           console.error(`Unknown option: ${arg}`);
           process.exit(1);
         }
-        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory" || result.command === "skill" || result.command === "eval")) {
+        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status" || result.command === "memory" || result.command === "todo" || result.command === "skill" || result.command === "eval")) {
           result.task = arg; // goal for run/task; id for resume/status; subcommand for memory/skill/eval
-        } else if (result.task !== undefined && (result.command === "memory" || result.command === "skill" || result.command === "eval")) {
+        } else if (result.task !== undefined && (result.command === "memory" || result.command === "todo" || result.command === "skill" || result.command === "eval")) {
           result.extras.push(arg); // subcommand's arguments (ids/names)
         } else {
           console.error(`Unexpected argument: ${arg}`);
@@ -190,6 +199,9 @@ Usage:
   piharness task "goal"             Managed task with acceptance checks
   piharness resume [id]             Resume an active managed task
   piharness status [id]             Show task state (default: active task)
+  piharness todo list [--all]       Open todos in this workspace (persisted)
+  piharness todo add "text"         Add a todo
+  piharness todo done <id>          Mark a todo done
   piharness memory list             List project memory facts
   piharness memory add "fact"       Add a memory fact (--tag, --source user|verified)
   piharness memory remove <id>      Remove a memory fact
@@ -271,6 +283,19 @@ function createStreamHandler(verbose: boolean = true) {
   };
 }
 
+// ─── Extensions ────────────────────────────────────────────────────────────────
+
+/**
+ * Built-in extensions for a workspace: todos, memory, web, code navigation.
+ * Evaluation runs deliberately do NOT get these, so scenario results stay
+ * comparable with the recorded benchmark; interactive use gets everything.
+ */
+function builtinExtensions(cwd: string): BuiltinResult & { agentDir: string } {
+  const agent = ensureAgentDir();
+  const built = createBuiltinExtensions({ cwd, agentDir: agent.dir });
+  return { ...built, agentDir: agent.dir };
+}
+
 // ─── One-shot task execution ───────────────────────────────────────────────────
 
 async function runTask(config: HarnessConfig, task: string): Promise<void> {
@@ -283,6 +308,7 @@ async function runTask(config: HarnessConfig, task: string): Promise<void> {
     provider: config.provider,
     model: config.model,
     thinkingLevel: config.thinkingLevel,
+    harnessExtensions: builtinExtensions(config.cwd).extensions,
   });
 
   const handler = createStreamHandler(true);
@@ -440,6 +466,7 @@ async function runManagedTask(
           provider: config.provider,
           model: config.model,
           thinkingLevel: config.thinkingLevel,
+          harnessExtensions: builtinExtensions(config.cwd).extensions,
         }),
       runPrompt: async (session, prompt) => streamedRunPrompt(session, prompt),
       disposeSession: (session) => session.dispose(),
@@ -461,11 +488,13 @@ async function runInteractive(config: HarnessConfig, plain = false): Promise<voi
   }
 
   const { runTui } = await import("./ui/app.js");
+  const ext = builtinExtensions(config.cwd);
   const session = await createHarnessSession({
     cwd: config.cwd,
     provider: config.provider,
     model: config.model,
     thinkingLevel: config.thinkingLevel,
+    harnessExtensions: ext.extensions,
   });
   try {
     await runTui({
@@ -474,6 +503,9 @@ async function runInteractive(config: HarnessConfig, plain = false): Promise<voi
       model: config.model,
       cwd: config.cwd,
       workspace: config.cwd,
+      agentDir: ext.agentDir,
+      toolNames: ext.toolNames,
+      extensionInfo: () => session.getExtensionInfo(),
     });
   } finally {
     session.dispose();
@@ -492,11 +524,13 @@ async function runPlainRepl(config: HarnessConfig): Promise<void> {
   console.error(`\x1b[90mModel: ${config.provider}/${config.model}\x1b[0m`);
   console.error(`\x1b[90mType a task, or /quit to exit, /cancel to abort.\x1b[0m\n`);
 
+  const ext = builtinExtensions(config.cwd);
   const session = await createHarnessSession({
     cwd: config.cwd,
     provider: config.provider,
     model: config.model,
     thinkingLevel: config.thinkingLevel,
+    harnessExtensions: ext.extensions,
   });
 
   const handler = createStreamHandler(true);
@@ -529,7 +563,70 @@ async function runPlainRepl(config: HarnessConfig): Promise<void> {
       }
       if (trimmed === "/stats") {
         const stats = session.getSessionStats();
-        console.error(`\x1b[90mTool calls: ${stats.toolCalls} | Tokens: ${stats.tokens.total}\x1b[0m`);
+        const ctx = session.getContextUsage();
+        console.error(
+          `\x1b[90mtools ${stats.toolCalls} | tokens ${stats.tokens.total} (${stats.tokens.input} in / ${stats.tokens.output} out) | ` +
+            `${formatContext(ctx) || "ctx unknown"} | session ${session.sessionId}\x1b[0m`,
+        );
+        continue;
+      }
+      if (trimmed === "/compact" || trimmed.startsWith("/compact ")) {
+        const instructions = trimmed.slice("/compact".length).trim();
+        try {
+          const res = await session.compact(instructions || undefined);
+          console.error(
+            `\x1b[90mcompacted: ${formatTokens(res.tokensBefore)} → ${formatTokens(res.estimatedTokensAfter ?? 0)} tokens\x1b[0m`,
+          );
+        } catch (err) {
+          console.error(`\x1b[31mcompaction failed: ${err instanceof Error ? err.message : String(err)}\x1b[0m`);
+        }
+        continue;
+      }
+      if (trimmed === "/todos" || trimmed.startsWith("/todos ")) {
+        const arg = trimmed.slice("/todos".length).trim();
+        const [verb, ...rest] = arg.split(/\s+/).filter(Boolean);
+        const text = rest.join(" ").trim();
+        try {
+          if (!verb) {
+            console.error(renderTodos(loadTodos(config.cwd), { limit: 50 }) || "\x1b[90m(no open todos)\x1b[0m");
+          } else if (verb === "add" && text) {
+            const item = addTodo(config.cwd, text);
+            console.error(`added ${item.id}: ${item.text}`);
+          } else if (verb === "done" && text) {
+            const item = completeTodo(config.cwd, text);
+            console.error(item ? `done ${item.id}` : `no todo matches ${JSON.stringify(text)}`);
+          } else if ((verb === "rm" || verb === "remove") && text) {
+            const item = removeTodo(config.cwd, text);
+            console.error(item ? `removed ${item.id}` : `no todo matches ${JSON.stringify(text)}`);
+          } else {
+            console.error("usage: /todos [add|done|rm] <text>");
+          }
+        } catch (err) {
+          console.error(`\x1b[31m${err instanceof Error ? err.message : String(err)}\x1b[0m`);
+        }
+        continue;
+      }
+      if (trimmed === "/memory" || trimmed.startsWith("/memory ")) {
+        const arg = trimmed.slice("/memory".length).trim();
+        try {
+          if (arg.startsWith("add ")) {
+            const fact = addFact(config.cwd, arg.slice(4).trim());
+            console.error(`remembered ${fact.id}: ${fact.fact}`);
+          } else {
+            const project = renderFacts(loadMemoryFile(memoryPath(config.cwd)).facts, 50, 4000);
+            const global = renderFacts(loadMemoryFile(globalMemoryPath(ext.agentDir)).facts, 50, 4000);
+            console.error(`\x1b[90mproject:\x1b[0m\n${project || "(empty)"}\n\x1b[90mglobal:\x1b[0m\n${global || "(empty)"}`);
+          }
+        } catch (err) {
+          console.error(`\x1b[31m${err instanceof Error ? err.message : String(err)}\x1b[0m`);
+        }
+        continue;
+      }
+      if (trimmed === "/extensions") {
+        console.error(`tools: ${ext.toolNames.join(", ")}`);
+        const info = session.getExtensionInfo();
+        console.error(`loaded: ${info.paths.join(", ") || "built-ins only"}`);
+        for (const d of info.diagnostics) console.error(`\x1b[31m${d}\x1b[0m`);
         continue;
       }
 
@@ -709,6 +806,59 @@ async function runEval(config: HarnessConfig, args: CliArgs): Promise<void> {
       process.exit(1);
     }
     throw e;
+  }
+}
+
+function runTodo(config: HarnessConfig, args: CliArgs): void {
+  const sub = args.task;
+  const text = args.extras.join(" ").trim();
+  const ws = config.cwd;
+  try {
+    switch (sub) {
+      case "list":
+      case undefined: {
+        const body = renderTodos(loadTodos(ws), { includeDone: args.all });
+        console.log(body || "No open todos. Add one with: piharness todo add \"text\"");
+        return;
+      }
+      case "add": {
+        if (!text) {
+          console.error('Usage: piharness todo add "text"');
+          process.exit(1);
+        }
+        const item = addTodo(ws, text);
+        console.log(`Added ${item.id}: ${item.text}`);
+        return;
+      }
+      case "done":
+      case "rm":
+      case "remove":
+      case "reopen": {
+        if (!text) {
+          console.error(`Usage: piharness todo ${sub} <id>`);
+          process.exit(1);
+        }
+        const fn = sub === "done" ? completeTodo : sub === "reopen" ? reopenTodo : removeTodo;
+        const item = fn(ws, text);
+        if (!item) {
+          console.error(`No unique todo matches ${JSON.stringify(text)}`);
+          process.exit(1);
+        }
+        console.log(`${sub}: ${item.id} ${item.text}`);
+        return;
+      }
+      case "clear":
+      case "clear_done": {
+        console.log(`Removed ${clearDoneTodos(ws)} finished todo(s)`);
+        return;
+      }
+      default:
+        console.error("Usage: piharness todo list [--all] | add \"text\" | done <id> | reopen <id> | rm <id> | clear");
+        process.exit(1);
+    }
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
   }
 }
 
@@ -1007,6 +1157,9 @@ async function main(): Promise<void> {
     }
     case "memory":
       runMemory(config, args);
+      break;
+    case "todo":
+      runTodo(config, args);
       break;
     case "skill":
       runSkill(config, args);

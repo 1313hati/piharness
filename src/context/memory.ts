@@ -1,7 +1,11 @@
 /**
- * Project memory: small verified facts about this repository, stored at
- * `<workspace>/.harness/memory.json`. Local-only (gitignored), written
- * atomically. Facts are data, never instructions to the agent.
+ * Memory: small verified facts about a project, stored as JSON and written
+ * atomically. Two scopes share one format:
+ *
+ *   project — `<workspace>/.harness/memory.json` (gitignored, per repo)
+ *   global  — `<agentDir>/memory.json` (follows the user across projects)
+ *
+ * Facts are data, never instructions to the agent.
  */
 
 import { readFileSync, existsSync, unlinkSync } from "node:fs";
@@ -38,21 +42,30 @@ export function memoryPath(workspace: string): string {
   return join(workspace, ".harness", "memory.json");
 }
 
+/** Global memory file, in the harness agent dir (survives every project). */
+export function globalMemoryPath(agentDir: string): string {
+  return join(agentDir, "memory.json");
+}
+
 /**
- * Load project memory. Missing file → empty memory. Present but invalid →
- * MemoryError (never silently ignore a corrupt memory file).
+ * Load memory from an explicit file. Missing file → empty memory. Present but
+ * invalid → MemoryError (never silently ignore a corrupt memory file).
  */
-export function loadMemory(workspace: string): Memory {
-  const p = memoryPath(workspace);
-  if (!existsSync(p)) return { version: MEMORY_SCHEMA_VERSION, facts: [] };
+export function loadMemoryFile(path: string): Memory {
+  if (!existsSync(path)) return { version: MEMORY_SCHEMA_VERSION, facts: [] };
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(p, "utf-8"));
+    raw = JSON.parse(readFileSync(path, "utf-8"));
   } catch (e) {
-    throw new MemoryError(`${p} has corrupt JSON: ${String(e)}; inspect it manually.`);
+    throw new MemoryError(`${path} has corrupt JSON: ${String(e)}; inspect it manually.`);
   }
   validateMemory(raw);
   return raw as Memory;
+}
+
+/** Load project memory (`<workspace>/.harness/memory.json`). */
+export function loadMemory(workspace: string): Memory {
+  return loadMemoryFile(memoryPath(workspace));
 }
 
 function validateMemory(raw: unknown): void {
@@ -84,17 +97,22 @@ function validateMemory(raw: unknown): void {
   }
 }
 
+export function saveMemoryFile(path: string, memory: Memory): void {
+  atomicWriteJson(path, memory);
+}
+
 export function saveMemory(workspace: string, memory: Memory): void {
-  atomicWriteJson(memoryPath(workspace), memory);
+  saveMemoryFile(memoryPath(workspace), memory);
 }
 
 function makeFactId(): string {
-  return `f${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`;
+  // Random first so short id prefixes stay unambiguous.
+  return `f${randomUUID().slice(0, 6)}`;
 }
 
-/** Add a fact and persist. Returns the new fact. */
-export function addFact(
-  workspace: string,
+/** Add a fact to an explicit memory file and persist it. Returns the new fact. */
+export function addFactToFile(
+  path: string,
   fact: string,
   opts: { tags?: string[]; source?: "user" | "verified" } = {},
 ): MemoryFact {
@@ -103,7 +121,7 @@ export function addFact(
   if (trimmed.length > MAX_FACT_LENGTH) {
     throw new MemoryError(`fact is longer than ${MAX_FACT_LENGTH} characters`);
   }
-  const memory = loadMemory(workspace);
+  const memory = loadMemoryFile(path);
   if (memory.facts.length >= MAX_FACTS) {
     throw new MemoryError(`memory holds the max of ${MAX_FACTS} facts; remove some first`);
   }
@@ -115,20 +133,64 @@ export function addFact(
     createdAt: new Date().toISOString(),
   };
   memory.facts.push(newFact);
-  saveMemory(workspace, memory);
+  saveMemoryFile(path, memory);
   return newFact;
 }
 
-/** Remove a fact by id and persist. Returns true if a fact was removed. */
-export function removeFact(workspace: string, id: string): boolean {
-  const memory = loadMemory(workspace);
-  const idx = memory.facts.findIndex((f) => f.id === id);
-  if (idx === -1) return false;
-  memory.facts.splice(idx, 1);
-  if (memory.facts.length === 0) {
-    unlinkSync(memoryPath(workspace));
-  } else {
-    saveMemory(workspace, memory);
+/** Add a fact to project memory and persist it. Returns the new fact. */
+export function addFact(
+  workspace: string,
+  fact: string,
+  opts: { tags?: string[]; source?: "user" | "verified" } = {},
+): MemoryFact {
+  return addFactToFile(memoryPath(workspace), fact, opts);
+}
+
+/** Remove a fact (by id, or by exact/unique-substring text) from a file. */
+export function removeFactFromFile(path: string, idOrText: string): MemoryFact | undefined {
+  const memory = loadMemoryFile(path);
+  const needle = idOrText.trim();
+  if (needle.length === 0) return undefined;
+  let idx = memory.facts.findIndex((f) => f.id === needle);
+  if (idx === -1) {
+    const matches = memory.facts
+      .map((f, i) => ({ f, i }))
+      .filter(({ f }) => f.fact.toLowerCase().includes(needle.toLowerCase()));
+    if (matches.length !== 1) return undefined;
+    idx = matches[0].i;
   }
-  return true;
+  const [removed] = memory.facts.splice(idx, 1);
+  if (memory.facts.length === 0) unlinkSync(path);
+  else saveMemoryFile(path, memory);
+  return removed;
+}
+
+/** Remove a fact by id from project memory. Returns true if one was removed. */
+export function removeFact(workspace: string, id: string): boolean {
+  return removeFactFromFile(memoryPath(workspace), id) !== undefined;
+}
+
+/** Facts whose text or tags contain the query (case-insensitive). */
+export function searchFacts(memory: Memory, query: string): MemoryFact[] {
+  const q = query.trim().toLowerCase();
+  if (q.length === 0) return memory.facts;
+  const words = q.split(/\s+/).filter(Boolean);
+  return memory.facts.filter((f) => {
+    const haystack = `${f.fact} ${f.tags.join(" ")}`.toLowerCase();
+    return words.every((w) => haystack.includes(w));
+  });
+}
+
+/** Render facts as compact markdown bullets, newest last, capped. */
+export function renderFacts(facts: MemoryFact[], limit = 20, maxChars = 1_200): string {
+  const shown = facts.slice(-limit);
+  const lines: string[] = [];
+  let used = 0;
+  for (const fact of shown) {
+    const line = `- ${fact.fact}${fact.tags.length > 0 ? ` [${fact.tags.join(", ")}]` : ""}`;
+    if (used + line.length > maxChars) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return lines.join("\n");
 }

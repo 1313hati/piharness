@@ -409,3 +409,69 @@ recorded as failures, and `eval score` reports both arms separately.
 - Better still: keep the current set as a regression suite (it should stay at
   100%) and add a separate "hard" set where baseline pass rate is well below
   1.0 — a skill can only be shown to help where the baseline sometimes fails.
+
+## M11: compaction, extensions, live stats (2026-10-17)
+
+**Implemented behavior**
+
+- `/compact [notes]` wraps Pi's `agentSession.compact()`; auto-compaction
+  stays Pi's. `getContextUsage()` now remembers the last known token count so
+  the footer does not blank out right after a manual compaction.
+- Extension layer: harness-owned `HarnessTool` objects in `src/extensions/`,
+  adapted to Pi in `src/pi/extensions.ts` (`registerTool` +
+  `before_agent_start`). Built-ins: `todo` (persistent `.harness/todos.json`),
+  `memory` (project `.harness/memory.json` + global `<agentDir>/memory.json`),
+  `web_search`/`web_fetch` (DuckDuckGo HTML, SearXNG via
+  `PIHARNESS_SEARCH_URL`, no API key), `outline`/`repo_map` (regex symbols,
+  bounded scan, no LSP). Open todos and both memory scopes are injected into
+  the system prompt every turn.
+- TUI: footer meters for t/s, context window, GPU (sampled with `nvidia-smi`)
+  and turn time; `/stats`, `/compact`, `/todos`, `/memory`, `/extensions`
+  commands; `/extensions` reports Pi loader diagnostics.
+- CLI: `piharness todo list|add|done|reopen|rm|clear`.
+- Built-ins are attached to interactive and one-shot sessions only. Evaluation
+  runs deliberately skip them so the recorded benchmark stays comparable.
+
+**Checks and outcomes**
+
+- `npm run typecheck`, `npm run build` — exit 0.
+- `npm test` — 121 pass / 0 fail (29 new tests: todo store, DDG/SearXNG/page
+  parsing with injected `fetch`, symbol outlines and repo-map bounds, stats
+  formatters, status-line degradation, extension registry and context block,
+  memory scopes and corrupt-file tolerance).
+- Real model (`local/qwen38`), one-shot runs:
+  - `todo` add → `.harness/todos.json` contains the item; a later session saw
+    it in `todo list` without being told.
+  - `memory` remember → `.harness/memory.json` contains the fact.
+  - `web_search "node test runner api"` returned real URLs; `web_fetch` on
+    `nodejs.org/api/test.html` returned the real title
+    ("Test runner | Node.js v26.12.0 Documentation"); `repo_map` and
+    `outline` returned the real files/symbols.
+  - Eight `web_fetch` turns grew the session to `ctx 33k/66k 50%`;
+    `/compact keep only the URLs fetched` reported `compacted: 33k → 23k
+    tokens`.
+- `piharness todo list|add` against a demo workspace reads and writes the same
+  file the model uses.
+
+**Known limitations**
+
+- Compaction is refused by Pi below its threshold ("Nothing to compact
+  (session too small)"). Observed: refused at 8.9k tokens, succeeded at 33k
+  (also with `compaction.keepRecentTokens` lowered to 6000), so the gate is
+  Pi's, not the harness's — the message is surfaced rather than forcing a
+  summary.
+- `/stats` right after a compaction used to blank the context meter (Pi reports
+  `tokens: null` until the next request). `mergeContextUsage()` keeps the last
+  estimate; covered by `tests/session-usage.test.ts`.
+- Extension dirs that do not exist are filtered out before being handed to Pi,
+  so `/extensions` no longer prints "Extension path does not exist" for the
+  normal case of built-ins only.
+- `outline`/`repo_map` are regex-based: they miss macros/dynamic definitions
+  and are a complement to `grep`, not a replacement for an LSP.
+- The GPU meter depends on `nvidia-smi`; without it the segment disappears.
+
+**Next action**
+
+- Build a hard eval set where the baseline sometimes fails, then measure
+  whether the extension tools (not just skills) move the pass rate. The
+  ranked options beyond that are in `docs/roadmap.md`.

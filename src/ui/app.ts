@@ -39,6 +39,19 @@ import {
   renderTranscript,
 } from "./blocks.js";
 import { BLACK_ORANGE, type Palette, bold, fg, maybeDisableForPipe, setColorEnabled } from "./theme.js";
+import {
+  type ContextInfo,
+  type GpuInfo,
+  StreamMeter,
+  formatContext,
+  formatDuration,
+  formatGpu,
+  formatRate,
+  formatTokens,
+} from "./stats.js";
+import { startGpuSampler } from "./gpu.js";
+import { addTodo, completeTodo, loadTodos, removeTodo, renderTodos } from "../extensions/todo.js";
+import { addFact, globalMemoryPath, loadMemoryFile, memoryPath, renderFacts } from "../context/memory.js";
 
 export interface TuiOptions {
   session: HarnessSession;
@@ -46,6 +59,12 @@ export interface TuiOptions {
   model: string;
   cwd: string;
   workspace: string;
+  /** Harness agent dir (global memory lives here). */
+  agentDir?: string;
+  /** Tool names exposed to the model, for /extensions. */
+  toolNames?: string[];
+  /** Loaded extension modules/dirs, for /extensions. */
+  extensionInfo?: () => { paths: string[]; diagnostics: string[] };
   palette?: Palette;
   /** Test seam: skip the real terminal. */
   terminal?: ProcessTerminal;
@@ -71,7 +90,16 @@ class TranscriptView implements Component {
 class StatusLine implements Component {
   constructor(
     private readonly palette: Palette,
-    private info: { busy: boolean; toolCalls: number; tokens: number; elapsedMs: number; hint: string },
+    private info: {
+      busy: boolean;
+      toolCalls: number;
+      tokens: number;
+      elapsedMs: number;
+      hint: string;
+      rate?: string;
+      context?: string;
+      gpu?: string;
+    },
   ) {}
   set(info: Partial<typeof this.info>): void {
     this.info = { ...this.info, ...info };
@@ -113,6 +141,9 @@ export async function runTui(options: TuiOptions): Promise<void> {
     tokens: 0,
     elapsedMs: 0,
     hint: HINT,
+    rate: "",
+    context: "",
+    gpu: "",
   });
 
   const editor = new HarnessEditor(
@@ -138,17 +169,33 @@ export async function runTui(options: TuiOptions): Promise<void> {
   let toolBlocks = new Map<string, ToolBlock>();
   let lastCtrlC = 0;
   let closed = false;
+  const meter = new StreamMeter();
+  let gpuInfo: GpuInfo | null = null;
+  let lastTurnOutputTokens: number | null = null;
+  let stopGpu: () => void = () => {};
   /** Duration of the last finished turn, so the footer doesn't snap back to 0.0s. */
   let lastTurnMs = 0;
 
+  const contextInfo = (): ContextInfo | null => {
+    try {
+      return options.session.getContextUsage() ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   const refreshStatus = () => {
     const stats = options.session.getSessionStats();
+    const elapsedMs = turn ? Date.now() - turn.startedAt : lastTurnMs;
     status.set({
       busy: Boolean(turn) && !turn?.finalised,
       toolCalls: stats.toolCalls,
       tokens: stats.tokens.total,
-      elapsedMs: turn ? Date.now() - turn.startedAt : lastTurnMs,
+      elapsedMs,
       hint: turn ? "ctrl+c cancels" : HINT,
+      rate: formatRate(meter.rate()),
+      context: formatContext(contextInfo()),
+      gpu: formatGpu(gpuInfo),
     });
     transcript.invalidate();
     tui.requestRender();
@@ -162,12 +209,22 @@ export async function runTui(options: TuiOptions): Promise<void> {
   const beginTurn = () => {
     turn = { startedAt: Date.now(), assistantIndex: null, thinkingIndex: null, finalised: false };
     toolBlocks = new Map();
+    meter.reset();
+    const stats = options.session.getSessionStats();
+    lastTurnOutputTokens = stats.tokens.output;
     refreshStatus();
   };
 
   const endTurn = (aborted: boolean) => {
     if (!turn) return;
     lastTurnMs = Date.now() - turn.startedAt;
+    try {
+      const stats = options.session.getSessionStats();
+      const before = lastTurnOutputTokens ?? 0;
+      meter.finish(Math.max(0, stats.tokens.output - before), lastTurnMs);
+    } catch {
+      // keep the streaming estimate
+    }
     if (turn.assistantIndex !== null) {
       const block = transcript.blocks[turn.assistantIndex];
       if (block?.kind === "assistant") block.streaming = false;
@@ -211,6 +268,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
       }
       case "text_delta": {
         if (!turn) break;
+        meter.delta(event.text);
         if (turn.assistantIndex === null) {
           turn.assistantIndex = push({ kind: "assistant", text: event.text, streaming: true });
         } else {
@@ -270,6 +328,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     if (closed) return;
     closed = true;
     clearInterval(ticker);
+    stopGpu();
     unsub();
     tui.stop();
     resolveClosed();
@@ -289,7 +348,8 @@ export async function runTui(options: TuiOptions): Promise<void> {
         return;
       case "/help":
         notice(
-          "/help  /status  /clear  /model  /quit — Enter sends, Ctrl+C cancels a running task",
+          "/help  /status  /stats  /compact [notes]  /todos  /memory  /extensions  /clear  /model  /quit\n" +
+            "Enter sends · Ctrl+C cancels a running task · /todos add <text> · /memory add <fact>",
         );
         return;
       case "/status": {
@@ -297,6 +357,58 @@ export async function runTui(options: TuiOptions): Promise<void> {
         notice(
           `${options.provider}/${options.model} · tools ${stats.toolCalls} · tokens ${stats.tokens.total} · cwd ${options.cwd}`,
         );
+        return;
+      }
+      case "/stats": {
+        const stats = options.session.getSessionStats();
+        const ctx = contextInfo();
+        const lines = [
+          `model      ${options.provider}/${options.model}`,
+          `session    ${options.session.sessionId}`,
+          `speed      ${formatRate(meter.rate()) || "—"}`,
+          `context    ${formatContext(ctx) || "unknown"}`,
+          `tokens     ${stats.tokens.total} total (${stats.tokens.input} in / ${stats.tokens.output} out)`,
+          `tools      ${stats.toolCalls} calls${options.toolNames?.length ? ` · ${options.toolNames.join(", ")}` : ""}`,
+          `turn       ${formatDuration(lastTurnMs)} last`,
+          gpuInfo
+            ? `gpu        ${formatGpu(gpuInfo)}${gpuInfo.tempC ? ` · ${gpuInfo.tempC}°C` : ""} (${gpuInfo.gpus} device${gpuInfo.gpus === 1 ? "" : "s"})`
+            : "gpu        unavailable",
+          `session    ${options.session.sessionFile ?? "(not persisted yet)"}`,
+        ];
+        for (const line of lines) notice(line);
+        return;
+      }
+      case "/compact": {
+        if (turn) {
+          notice("cancel the running turn before compacting (Ctrl+C)", "error");
+          return;
+        }
+        const instructions = input.slice("/compact".length).trim();
+        notice("compacting conversation…");
+        try {
+          const res = await options.session.compact(instructions || undefined);
+          notice(
+            `compacted: ${formatTokens(res.tokensBefore)} → ${formatTokens(res.estimatedTokensAfter ?? 0)} tokens` +
+              ` · summary ${res.summary.length} chars`,
+            "ok",
+          );
+        } catch (err) {
+          notice(`compaction failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+        }
+        refreshStatus();
+        return;
+      }
+      case "/todos":
+        return handleTodos(input.slice("/todos".length).trim());
+      case "/memory":
+        return handleMemory(input.slice("/memory".length).trim());
+      case "/extensions": {
+        const info = options.extensionInfo?.();
+        notice(`tools: ${options.toolNames?.join(", ") ?? "none"}`);
+        if (info) {
+          notice(`loaded: ${info.paths.length > 0 ? info.paths.join(", ") : "built-ins only"}`);
+          for (const d of info.diagnostics) notice(`extension problem: ${d}`, "error");
+        }
         return;
       }
       case "/clear":
@@ -309,6 +421,55 @@ export async function runTui(options: TuiOptions): Promise<void> {
         return;
       default:
         notice(`unknown command: ${cmd} — try /help`, "error");
+    }
+  };
+
+  const handleTodos = (arg: string): void => {
+    const [verb, ...rest] = arg.split(/\s+/).filter(Boolean);
+    const text = rest.join(" ").trim();
+    try {
+      if (!verb) {
+        const body = renderTodos(loadTodos(options.cwd), { includeDone: false });
+        notice(body || "todo list is empty — /todos add <text>");
+        return;
+      }
+      if (verb === "add") {
+        if (!text) return notice("usage: /todos add <text>", "error");
+        const item = addTodo(options.cwd, text);
+        notice(`added ${item.id}: ${item.text}`, "ok");
+      } else if (verb === "done") {
+        const item = completeTodo(options.cwd, text);
+        notice(item ? `done ${item.id}: ${item.text}` : `no todo matches ${JSON.stringify(text)}`, item ? "ok" : "error");
+      } else if (verb === "rm" || verb === "remove") {
+        const item = removeTodo(options.cwd, text);
+        notice(item ? `removed ${item.id}` : `no todo matches ${JSON.stringify(text)}`, item ? "ok" : "error");
+      } else {
+        notice("usage: /todos [add|done|rm] <text>", "error");
+      }
+    } catch (err) {
+      notice(err instanceof Error ? err.message : String(err), "error");
+    }
+  };
+
+  const handleMemory = (arg: string): void => {
+    const [verb, ...rest] = arg.split(/\s+/).filter(Boolean);
+    const text = rest.join(" ").trim();
+    const agentDir = options.agentDir;
+    try {
+      if (verb === "add" || verb === "remember") {
+        if (!text) return notice("usage: /memory add <fact>", "error");
+        const fact = addFact(options.cwd, text);
+        notice(`remembered ${fact.id}: ${fact.fact}`, "ok");
+        return;
+      }
+      const project = renderFacts(loadMemoryFile(memoryPath(options.cwd)).facts, 50, 4_000);
+      notice(`project memory:\n${project || "(empty)"}`);
+      if (agentDir) {
+        const global = renderFacts(loadMemoryFile(globalMemoryPath(agentDir)).facts, 50, 4_000);
+        notice(`global memory:\n${global || "(empty)"}`);
+      }
+    } catch (err) {
+      notice(err instanceof Error ? err.message : String(err), "error");
     }
   };
 
@@ -361,7 +522,16 @@ export async function runTui(options: TuiOptions): Promise<void> {
     notice("press Ctrl+C again to quit, or type /quit");
   };
 
-  // Keep the elapsed clock moving while a turn is in flight.
+  // Keep the elapsed clock and the GPU meter moving.
+  stopGpu = startGpuSampler({
+    onSample: (gpu) => {
+      gpuInfo = gpu;
+      // Only redraw for telemetry while idle; during a turn the stream already
+      // triggers renders, and a GPU frame every 2.5s would just add noise.
+      if (!turn) refreshStatus();
+    },
+  });
+
   const ticker = setInterval(() => {
     if (turn && !turn.finalised) refreshStatus();
   }, 500);

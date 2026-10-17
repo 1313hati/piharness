@@ -246,17 +246,35 @@ export interface StatusInfo {
   tokens: number;
   elapsedMs: number;
   hint: string;
+  /** Generation speed, e.g. "12.3 t/s" ("" hides it). */
+  rate?: string;
+  /** Context usage, e.g. "ctx 8.2k/32k 26%" ("" hides it). */
+  context?: string;
+  /** GPU load, e.g. "gpu 87% 21.4/24.0G" ("" hides it). */
+  gpu?: string;
 }
 
 export function renderStatus(info: StatusInfo, width: number, p: Palette): string[] {
   const dot = info.busy ? fg(p.accent, "◐") : fg(p.accentSoft, "○");
-  const left = [
-    `${dot} ${info.busy ? "working" : "ready"}`,
-    `tools ${info.toolCalls}`,
-    `tokens ${info.tokens}`,
-    `${(info.elapsedMs / 1000).toFixed(1)}s`,
-  ].join(fg(p.muted, "  ·  "));
+  const sep = fg(p.muted, "  ·  ");
   const hint = fg(p.muted, info.hint);
+
+  // Segments in priority order: the right-hand hint and the essentials always
+  // fit; the meters are dropped from the right (least useful first) when the
+  // terminal is narrow, instead of wrapping the status line.
+  const optional = [info.gpu, info.context, info.rate, `tokens ${info.tokens}`].filter(
+    (s): s is string => typeof s === "string" && s.length > 0,
+  );
+  const base = [`${dot} ${info.busy ? "working" : "ready"}`, `tools ${info.toolCalls}`,
+    `${(info.elapsedMs / 1000).toFixed(1)}s`];
+
+  const build = (segments: string[]) => [base[0], base[1], ...segments, base[2]].join(sep);
+  let segments = [...optional];
+  let left = build(segments);
+  while (visibleWidth(left) + visibleWidth(hint) + 3 > width && segments.length > 0) {
+    segments = segments.slice(0, -1);
+    left = build(segments);
+  }
   const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(hint) - 2);
   return [padTo(`${fg(p.text, left)}${" ".repeat(gap)}${hint}`, width, p.surface)];
 }

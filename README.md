@@ -44,6 +44,27 @@ again. Sessions, settings and any auth state the harness creates stay in the
 harness directory, so the two front-ends cannot overwrite each other. Nothing
 in `~/.pi` is modified — `pi` keeps working exactly as before.
 
+## What the agent can do
+
+- **Code navigation without an LSP** — `repo_map` (bounded file tree with top
+  symbols), `outline` (symbols + line numbers for one file), plus `grep`.
+- **Persistent todos** — `todo` keeps a task list in `.harness/todos.json`;
+  open items are injected into the system prompt every turn, so a fresh
+  session picks up where the last one stopped.
+- **Persistent memory** — `memory` stores verified facts per project
+  (`.harness/memory.json`) or globally (`<agentDir>/memory.json`). Facts are
+  data, never instructions.
+- **Web access without keys** — `web_search` (DuckDuckGo HTML, or SearXNG via
+  `PIHARNESS_SEARCH_URL`) and `web_fetch` (page → clean text).
+- **Compaction** — `/compact [notes]` summarizes the conversation when the
+  context window fills; Pi's auto-compaction still runs on its own thresholds.
+- **Live runtime stats** — the TUI footer shows generation speed (t/s),
+  context usage (`ctx 8.2k/66k 12%`), GPU utilization/memory and turn time.
+
+Tools are harness-owned objects (`src/extensions/`), registered with Pi through
+one small adapter (`src/pi/extensions.ts`). Pi extension modules dropped into
+`.harness/extensions/` or `<agentDir>/extensions/` load alongside them.
+
 ## Usage
 
 ```sh
@@ -63,6 +84,11 @@ piharness resume        # resume the active task
 # Project memory (injected into task prompts)
 piharness memory add "Releases go out from main" --tag release
 piharness memory list
+
+# Todos (persisted per repo)
+piharness todo list
+piharness todo add "write the migration"
+piharness todo done <id>
 
 # Learning: propose → evaluate → approve
 piharness skill propose <taskId>
@@ -153,7 +179,7 @@ docs/progress.md      Current milestone, evidence, next action
 
 ## Status
 
-See [docs/progress.md](docs/progress.md). M0–M9 are done with 92/92 tests and clean typecheck/build. The whole loop has run against the real local model (`local/qwen38`, Qwen3.8 27B UD-Q4_K_XL on llama.cpp): managed tasks complete with passing checks, both eval arms pass a scenario, and a skill learned from a completed task is proposed, evaluated, promoted and then observed in a later run's injected context. The A/B arm difference is not yet statistically meaningful (one run per arm) — see the M8 section for the honest reading. M9 adds packaging (`piharness` command, isolated agent dir) and the black/orange TUI; M10 grows the benchmark to four scenarios and twelve runs per arm — see the saturation caveat there.
+See [docs/progress.md](docs/progress.md) for what has been built and [docs/roadmap.md](docs/roadmap.md) for what is worth building next. M0–M11 are done with 121/121 tests and clean typecheck/build. The whole loop has run against the real local model (`local/qwen38`, Qwen3.8 27B UD-Q4_K_XL on llama.cpp): managed tasks complete with passing checks, both eval arms pass a scenario, and a skill learned from a completed task is proposed, evaluated, promoted and then observed in a later run's injected context. The A/B arm difference is not yet statistically meaningful (one run per arm) — see the M8 section for the honest reading. M9 adds packaging (`piharness` command, isolated agent dir) and the black/orange TUI; M10 grows the benchmark to four scenarios and twelve runs per arm — see the saturation caveat there. M11 adds compaction, the extension layer (persistent todos/memory, keyless web access, LSP-free code navigation) and live runtime statistics.
 
 ## Trust model
 
