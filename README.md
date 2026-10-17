@@ -65,6 +65,25 @@ Tools are harness-owned objects (`src/extensions/`), registered with Pi through
 one small adapter (`src/pi/extensions.ts`). Pi extension modules dropped into
 `.harness/extensions/` or `<agentDir>/extensions/` load alongside them.
 
+## Learning from your sessions
+
+After a session that changed files and finished with a passing gate
+(`npm test`, `npm run build`, `pytest`, …), the harness writes the evidence and
+drafts a skill. When the same procedure shows up in a second, independent
+session and the gate still passes, the draft is promoted into
+`.harness/skills/` and injected into later prompts.
+
+```
+◇ learn: reinforced fix-the-failing-sum-test   (2/2 sessions needed before promotion)
+★ learn: promoted   fix-the-failing-sum-test   — verified and promoted to .harness/skills/
+```
+
+- `/learn` inside the TUI, or `piharness learn [id]`, mines on demand.
+- `piharness learn list` shows drafts, evidence counts and auto-promotions.
+- Sessions that changed nothing, or whose gate failed, teach nothing.
+- Turn it off with `PIHARNESS_NO_LEARN=1`; require more evidence with
+  `PIHARNESS_MIN_EVIDENCE=3`; keep drafts manual with `PIHARNESS_AUTO_PROMOTE=0`.
+
 ## Usage
 
 ```sh

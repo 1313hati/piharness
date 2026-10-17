@@ -33,6 +33,7 @@ Lean Pi Coding Harness: a single strict-TypeScript package around the Pi coding-
 | `.harness/state/proposals/` | Unapproved skills — **never discoverable as active** | Ignored |
 | `.harness/state/skill-versions/` | Immutable prior skill content + hashes | Ignored |
 | `.harness/state/evals/` | Run manifests, scores, evidence | Ignored |
+| `.harness/state/sessions/<id>.json` | Session evidence for the learning loop | Ignored |
 | `~/.config/<app>/` | User defaults | Outside project |
 
 Pi owns its session files; we store a reference (`sessionId`/`sessionFile`), never a second transcript copy.
@@ -56,6 +57,45 @@ models.json, auth.json, sessions, settings. Exactly one file is ever read from
 
 Anything that needs to know how the agent works stays in `src/pi/session.ts`;
 the TUI sees only `NormalizedEvent`s and session stats.
+
+## Learning loop
+
+Every finished session is turned into evidence, and evidence can become a
+skill — but only through the gate below. Nothing is learned from a session
+that did not change files and prove it with a passing gate.
+
+```
+transcript ──deriveEvidence──▶ .harness/state/sessions/<id>.json
+                                     │
+                     signature = verify commands + tool sequence
+                                     │
+              ┌──────────────────────┴───────────────────────┐
+      new signature                                    known signature
+      draft proposal (inert)                    append session, count++
+              └──────────────────────┬───────────────────────┘
+                                     │ evidenceCount >= 2
+                          evaluate verify commands in the workspace
+                                     │
+                         pass ───────┴─────── fail
+                          │                   │
+                 promote to .harness/        stays proposed ("blocked")
+                 skills/<name>/SKILL.md      and is never injected
+```
+
+- **Evidence** (`src/learn/evidence.ts`) is Pi-free: goals, tool traces,
+  changed paths, and *canonical* verify commands (`npm test`,
+  `npm run build`, `pytest`, `cargo test`, …). A raw command line from a
+  transcript is never re-executed; only the recognised canonical gate is.
+- **Signature** (`src/learn/mine.ts`) is the verify set plus the sequence of
+  non-exploratory tool names. Two sessions that solved the same problem the
+  same way reinforce one draft instead of cloning it; a different approach
+  creates a different draft.
+- **Gate**: promotion needs ≥ 2 independent sessions *and* a passing
+  evaluation run at promotion time. A repo that no longer passes keeps the
+  draft inert, so a stale procedure can never silently become guidance.
+- **Opt-outs**: `PIHARNESS_NO_LEARN=1`, `PIHARNESS_AUTO_PROMOTE=0`,
+  `PIHARNESS_MIN_EVIDENCE=<n>`, `piharness learn --dry-run|--no-promote`.
+- Learning can never fail a session: failures are reported, not thrown.
 
 ## Extension layer
 

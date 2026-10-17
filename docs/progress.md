@@ -475,3 +475,62 @@ recorded as failures, and `eval score` reports both arms separately.
 - Build a hard eval set where the baseline sometimes fails, then measure
   whether the extension tools (not just skills) move the pass rate. The
   ranked options beyond that are in `docs/roadmap.md`.
+
+## M12: learning from every session, visible t/s (2026-10-17)
+
+**Implemented behavior**
+
+- `src/learn/evidence.ts`: a finished session becomes evidence — goals, tool
+  traces, changed paths and *canonical* verify commands (`npm test`,
+  `npm run build`, `npx tsc --noEmit`, `pytest`, `cargo test`, `go test`,
+  `make test`, …). Raw command lines are never re-executed, so a transcript
+  cannot smuggle a side effect into an evaluation. Stored under
+  `.harness/state/sessions/<id>.json`.
+- `src/learn/mine.ts`: the loop. Drafts a proposal on the first qualifying
+  session, reinforces by signature (verify set + non-exploratory tool
+  sequence) on later ones, and — with ≥ 2 independent sessions and a passing
+  evaluation *at promotion time* — promotes it into `.harness/skills/` and
+  marks it `autoPromoted`. Failed gates and broken workspaces leave the draft
+  inert ("blocked"), never silently approved.
+- Hooks: interactive sessions learn on exit, one-shot `run` sessions record
+  evidence too, `/learn` mines mid-session, and `piharness learn [id]
+  [--dry-run] [--no-promote]|list` exposes it from the CLI. Opt-outs:
+  `PIHARNESS_NO_LEARN=1`, `PIHARNESS_AUTO_PROMOTE=0`,
+  `PIHARNESS_MIN_EVIDENCE=<n>`. Learning never throws into a session.
+- Footer: `t/s` is now ordered first and never dropped when the terminal is
+  narrow, thinking deltas count toward the rate, and the rate is measured over
+  the decode window instead of wall-clock ÷ provider output tokens (which
+  under-reported short answers by an order of magnitude on a reasoning model).
+
+**Checks and outcomes**
+
+- `npm run typecheck`, `npm run build`, `npm test` — 128 pass / 0 fail
+  (7 new learning tests: canonicalisation, evidence derivation, rejection
+  reasons, signature stability, draft→reinforce→promote, dry-run/no-promote,
+  and a broken-gate workspace staying blocked).
+- Real model (`local/qwen38`) in `/tmp/learn-demo` (buggy `sum.js`, `npm test`
+  failing):
+  - session 1 ("fix the failing test… run npm test") → proposal drafted,
+    `evidenceCount=1`, status `proposed`, 5 tool calls, 0 errors.
+  - bug re-introduced, session 2 → same signature, `evidenceCount=2`,
+    evaluation ran `npm test` (passed) → promoted automatically;
+    `.harness/skills/fix-the-failing-test-…/SKILL.md` exists and
+    `piharness learn list` reports `[approved · auto] evidence=2`.
+  - TUI `/learn` on a read-only session answered honestly:
+    `not learned: no files were changed`.
+- Footer verified in a real 100-column TUI session: `◐ working · tools 0 ·
+  1.0 t/s · ctx 3.3k/66k 5%` while streaming and `37 t/s` after the turn.
+
+**Known limitations**
+
+- Learning is per workspace (`.harness/`), so the same lesson is re-learned
+  in each repo. A global promotion path would need its own gate.
+- Evidence stores tool names/details, not full tool output; the draft is a
+  procedure, not a replayable trace.
+- The benchmark is still saturated, so "skills improve results" remains
+  unproven — the loop proves it does not regress `npm test`.
+
+**Next action**
+
+- Hard eval set where the baseline sometimes fails; then compare three arms
+  (no skills, hand-written skill, auto-promoted skill).
