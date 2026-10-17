@@ -15,7 +15,10 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { loadConfig, type HarnessConfig } from "./config.js";
+import { ensureAgentDir } from "./pi/agent-dir.js";
 import { createHarnessSession, type HarnessSession, type NormalizedEvent } from "./pi/session.js";
 import {
   runTask as controllerRunTask,
@@ -69,6 +72,8 @@ interface CliArgs {
   all?: boolean;
   /** eval run --no-skills: baseline arm with learned skills withheld. */
   noSkills?: boolean;
+  /** interactive: force the line REPL instead of the TUI. */
+  plain?: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -133,6 +138,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "--no-skills":
         result.noSkills = true;
         break;
+      case "--plain":
+        result.plain = true;
+        break;
       case "--tag":
         result.tags.push(args[++i]);
         break;
@@ -173,42 +181,48 @@ function parseArgs(argv: string[]): CliArgs {
 
 function printHelp(): void {
   console.log(`
-piharness — Lean Pi Coding Harness
+piharness — Pi-based coding harness
 
 Usage:
-  harness                        Start interactive session
-  harness run "task description" Run a one-shot task (no controller)
-  harness task "goal"            Managed task with acceptance checks
-  harness resume [id]            Resume an active managed task
-  harness status [id]            Show task state (default: active task)
-  harness memory list            List project memory facts
-  harness memory add "fact"      Add a memory fact (tags via --tag, --source user|verified)
-  harness memory remove <id>     Remove a memory fact
-  harness skill propose <taskId> Draft a skill proposal from a completed task
-  harness skill list             List skill proposals (inert until approved)
-  harness skill show <name>      Show a proposal's SKILL.md draft
-  harness skill evaluate <name>  Run the proposal's verify commands
-  harness skill approve <name>   Promote a passed proposal into .harness/skills/
-  harness skill reject <name>    Reject a proposal
-  harness eval list              List evaluation scenarios (evals/scenarios/)
-  harness eval run <name>        Run one scenario into .harness/state/evals/
-  harness eval run --all         Run every scenario
-  harness eval run <name> --dry-run   Validate a scenario without calling a model
-  harness eval run <name> --no-skills  Baseline arm: same run with learned skills withheld
-  harness eval score [name]      Pass rate and cost across recorded runs, per arm
-  harness doctor                 Check configuration and backend
+  piharness                         Interactive TUI (black + orange)
+  piharness --plain                 Interactive line REPL instead of the TUI
+  piharness run "task"              One-shot task (no controller)
+  piharness task "goal"             Managed task with acceptance checks
+  piharness resume [id]             Resume an active managed task
+  piharness status [id]             Show task state (default: active task)
+  piharness memory list             List project memory facts
+  piharness memory add "fact"       Add a memory fact (--tag, --source user|verified)
+  piharness memory remove <id>      Remove a memory fact
+  piharness skill propose <taskId>  Draft a skill proposal from a completed task
+  piharness skill list              List skill proposals (inert until approved)
+  piharness skill show <name>       Show a proposal's SKILL.md draft
+  piharness skill evaluate <name>   Run the proposal's verify commands
+  piharness skill approve <name>    Promote a passed proposal into .harness/skills/
+  piharness skill reject <name>     Reject a proposal
+  piharness eval list               List evaluation scenarios (evals/scenarios/)
+  piharness eval run <name>         Run one scenario into .harness/state/evals/
+  piharness eval run --all          Run every scenario
+  piharness eval run <name> --dry-run    Validate a scenario without calling a model
+  piharness eval run <name> --no-skills  Baseline arm: learned skills withheld
+  piharness eval score [name]       Pass rate and cost per arm
+  piharness doctor                  Check configuration and backend
 
 Options:
+  --plain            Interactive mode without the TUI (line REPL)
   --provider <id>    Model provider (default: local)
   --model <id>       Model id (default: qwen38)
   --cwd <dir>        Working directory (default: .)
-  --check "d|cmd"    Acceptance check: description, optional |verification command (repeatable)
+  --check "d|cmd"    Acceptance check: description, optional |verification command
   --tag <t>          Tag for memory add (repeatable)
   --source <s>       Source for memory add: user|verified
   --dry-run          eval run: validate the scenario, execute nothing
   --all              eval run: every scenario
-  --no-skills        eval run: omit .harness/skills from the run workspace (baseline arm)
+  --no-skills        eval run: omit .harness/skills (baseline arm)
+  -v, --version      Print version
   -h, --help         Show this help
+
+Isolation: this binary keeps its Pi state in ~/.config/piharness/agent (override
+with PIHARNESS_AGENT_DIR). Your pi install and ~/.pi are never written to.
 `);
 }
 
@@ -440,7 +454,34 @@ async function runManagedTask(
   }
 }
 
-async function runInteractive(config: HarnessConfig): Promise<void> {
+async function runInteractive(config: HarnessConfig, plain = false): Promise<void> {
+  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (plain || !tty) {
+    return runPlainRepl(config);
+  }
+
+  const { runTui } = await import("./ui/app.js");
+  const session = await createHarnessSession({
+    cwd: config.cwd,
+    provider: config.provider,
+    model: config.model,
+    thinkingLevel: config.thinkingLevel,
+  });
+  try {
+    await runTui({
+      session,
+      provider: config.provider,
+      model: config.model,
+      cwd: config.cwd,
+      workspace: config.cwd,
+    });
+  } finally {
+    session.dispose();
+  }
+}
+
+/** Line-based fallback for pipes, dumb terminals, and `--plain`. */
+async function runPlainRepl(config: HarnessConfig): Promise<void> {
   const readline = await import("node:readline/promises");
   const rl = readline.createInterface({
     input: process.stdin,
@@ -831,7 +872,13 @@ async function runDoctor(config: HarnessConfig): Promise<void> {
   // Check model availability
   try {
     const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
-    const runtime = await ModelRuntime.create({ refreshOnCreate: false });
+    const agent = ensureAgentDir();
+    console.log(`Agent dir: ${agent.dir}${agent.seeded ? " (models.json seeded from ~/.pi)" : ""}`);
+    const runtime = await ModelRuntime.create({
+      authPath: join(agent.dir, "auth.json"),
+      modelsPath: agent.modelsPath,
+      refreshOnCreate: false,
+    });
     const providers = runtime.getProviders();
     console.log(`Providers: ${providers.map((p) => p.id).join(", ")}`);
 
@@ -883,7 +930,24 @@ function shutdown(code: number): void {
   process.stdout.write("", () => process.exit(code));
 }
 
+function packageVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as {
+      version?: string;
+    };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  if (argv.includes("--version") || argv.includes("-v")) {
+    console.log(`piharness ${packageVersion()}`);
+    return;
+  }
+
   const args = parseArgs(process.argv);
 
   const config = loadConfig(
@@ -953,7 +1017,7 @@ async function main(): Promise<void> {
       break;
     case "interactive":
     default:
-      await runInteractive(config);
+      await runInteractive(config, args.plain);
       break;
   }
   // The Pi client keeps sockets/timers alive after a failed run; a one-shot

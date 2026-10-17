@@ -37,6 +37,26 @@ Lean Pi Coding Harness: a single strict-TypeScript package around the Pi coding-
 
 Pi owns its session files; we store a reference (`sessionId`/`sessionFile`), never a second transcript copy.
 
+## Agent directory isolation
+
+`pi` and `piharness` are separate front-ends and must not share state. The
+harness owns `~/.config/piharness/agent` (`PIHARNESS_AGENT_DIR` overrides):
+models.json, auth.json, sessions, settings. Exactly one file is ever read from
+`~/.pi/agent` — `models.json`, copied once on first run. Everything else in
+`~/.pi` is off-limits, so `pi` keeps working unchanged.
+
+## TUI layer
+
+`src/ui/` is presentation only and never imports the Pi agent loop:
+
+- `theme.ts` — palette + the only escape-code writers (truecolor, `NO_COLOR`-aware)
+- `blocks.ts` — pure `TranscriptBlock[] → string[]` renderer (testable without a pty)
+- `app.ts` — terminal ownership: `TuiMainScreen`, `VStack`, `Editor`, streaming
+  event mapping, Ctrl+C semantics, key commands
+
+Anything that needs to know how the agent works stays in `src/pi/session.ts`;
+the TUI sees only `NormalizedEvent`s and session stats.
+
 ## Configuration precedence
 
 CLI args → project `.harness/config.json` → user settings → defaults. Secrets live in environment variables or Pi's credential storage (`~/.pi/agent/auth.json`) — never in project config. Project config is untrusted until the workspace is trusted; no auto-loading of executable extensions from unfamiliar repos.

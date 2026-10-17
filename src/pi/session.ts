@@ -13,6 +13,8 @@ import {
   type AgentSessionEventListener,
   type CreateAgentSessionResult,
 } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import { ensureAgentDir } from "./agent-dir.js";
 
 // ─── Normalized event types (our interface) ───────────────────────────────────
 
@@ -74,6 +76,8 @@ export interface CreateSessionOptions {
   tools?: string[];
   /** Continue the most recent session */
   continueSession?: boolean;
+  /** Harness-owned Pi agent dir (default: ~/.config/piharness/agent). */
+  agentDir?: string;
 }
 
 /**
@@ -83,8 +87,13 @@ export interface CreateSessionOptions {
 export async function createHarnessSession(
   opts: CreateSessionOptions,
 ): Promise<HarnessSession> {
-  // Create a model runtime that loads from the user's ~/.pi/agent/ config
+  // Harness-owned agent dir: models.json seeded once from the pi install,
+  // sessions and settings never shared with it.
+  const agent = ensureAgentDir(opts.agentDir);
+
   const modelRuntime = await ModelRuntime.create({
+    authPath: join(agent.dir, "auth.json"),
+    modelsPath: agent.modelsPath,
     refreshOnCreate: false,
   });
 
@@ -99,6 +108,7 @@ export async function createHarnessSession(
 
   const result: CreateAgentSessionResult = await createAgentSession({
     cwd: opts.cwd,
+    agentDir: agent.dir,
     model,
     modelRuntime,
     thinkingLevel: (opts.thinkingLevel ?? "off") as any,

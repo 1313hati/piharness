@@ -281,3 +281,67 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 
 **Next action**
 - Grow the scenario set (2–3 more fixtures: multi-file refactor, failing-check repair, memory-dependent task) and run each arm N≥10 times to get pass rates with intervals. Only then is a skills-vs-baseline claim defensible.
+
+## M9: packaged as `piharness`, with its own TUI (2026-10-17)
+
+**Goal** — make this a thing the user can actually start (`piharness`), keep it
+from colliding with the `pi` install already on the machine, and give it a
+distinct look: black terminal, orange accent.
+
+**Packaging**
+- `package.json` declares `bin: { piharness, harness }` → `dist/cli.js`; the
+  `piharness` command on this machine is a two-line `~/.local/bin` wrapper that
+  execs `node /home/hati/code/piharness/dist/cli.js "$@"` (no `npm link`, no
+  global prefix, survives rebuilds).
+- `piharness --version` / `-v` prints `piharness 0.1.0`; `--help` documents the
+  new command name and `--plain`.
+
+**Isolation from `pi`** — `src/pi/agent-dir.ts`
+- The harness uses `~/.config/piharness/agent` (override:
+  `PIHARNESS_AGENT_DIR`) for `models.json`, `auth.json`, sessions and settings.
+- On first run it copies **only** `models.json` from `~/.pi/agent` and never
+  reads or writes `~/.pi` again. `~/.pi/agent/models.json` mtime is unchanged by
+  harness runs; `pi --version` still reports 1.3.0.
+- `piharness doctor` prints the agent dir and whether it was just seeded.
+
+**TUI** — `src/ui/` (built directly on `@earendil-works/pi-tui` 1.3.0)
+- `theme.ts` holds the palette and the only escape-code writers: bg `#0B0B0D`,
+  surface `#17141A`, accent `#FF8A1F`, soft accent `#C26512`, text `#EDE6DC`,
+  muted `#8B857C`, error `#FF5F56`. Truecolor; disabled when stdout is not a TTY
+  or `NO_COLOR` is set.
+- `blocks.ts` is a pure transcript renderer: user card with an orange rail, tool
+  blocks with status bullets and collapsed output, streamed assistant text with
+  a cursor, notices, plus the banner and the status footer. No terminal, no
+  timers — which is why `tests/ui.test.ts` can assert real layout at real widths.
+- `app.ts` owns the terminal: `TuiMainScreen`, `VStack`, `Editor`, streaming
+  events from `HarnessSession`, a 500 ms elapsed-clock ticker, and Ctrl+C
+  (cancel a running turn; second press within 1.5 s quits).
+- Layout: banner printed once above the managed region, then transcript →
+  status → editor, so the input box stays at the bottom of the screen.
+- `--plain` (or a non-TTY stdout) falls back to the original line REPL.
+
+**Bugs found by actually driving the TUI**
+- Ctrl+C never reached an input listener: this TUI gives control keys to the
+  focused component, so the interrupt is handled by overriding `Editor.handleInput`.
+- `abort()` cancels the HTTP request but `agent_end` may never arrive (llama.cpp
+  keeps decoding); the footer sat at "working" forever. The interrupt now ends
+  the turn in the UI immediately and aborts in the background.
+- Assistant text drew the rail glyph on every wrapped line; now only the first
+  line gets the glyph and the last line gets the streaming cursor.
+- The elapsed clock froze between events (0.0s forever) until a ticker was added.
+- Sending `\r` before the TUI enables raw mode gets translated to `\n` by the tty
+  and inserts a newline instead of submitting — a test harness gotcha, not a bug.
+
+**Evidence (real model, `local/qwen38`)**
+- TUI task: "Create a file named tui-check.txt containing the single word hello"
+  → one `write` tool block, `ready · tools 1 · tokens 6462`, file content `hello`.
+- Ctrl+C during a long generation → `· cancelled`, footer back to `ready` at 4.8 s.
+- `/status`, `/help`, `/quit` verified through a pty; `--plain` verified on a pipe.
+
+**Gates** — `npm run typecheck` clean, `npm run build` clean, `npm test` 89/89
+(10 new TUI tests: palette contrast, SGR emission, width-exact padding, tool
+collapse, transcript spacing, banner/status layout, arg/result summarisers).
+
+**Not done** — no mouse, no scrollback paging (a long transcript is the
+terminal's own scrollback), no syntax highlighting in tool output. The A/B
+evidence gap from M8 is unchanged.
