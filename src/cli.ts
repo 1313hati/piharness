@@ -4,18 +4,29 @@
  *
  * Commands:
  *   harness                    Interactive session
- *   harness run "task"         One-shot task execution
+ *   harness run "task"         One-shot task execution (no controller)
+ *   harness task "goal"        Managed task with acceptance checks (M2)
+ *   harness resume [id]        Resume an active managed task
+ *   harness status [id]        Show task state (or the active task)
  *   harness doctor             Configuration/backend diagnostics
  */
 
+import { execFileSync } from "node:child_process";
 import { loadConfig, type HarnessConfig } from "./config.js";
 import { createHarnessSession, type HarnessSession, type NormalizedEvent } from "./pi/session.js";
+import {
+  runTask as controllerRunTask,
+  formatStatus,
+} from "./task/controller.js";
+import { findActiveTask, listTaskIds, loadTask, saveTask } from "./task/store.js";
+import type { TaskCheck } from "./task/types.js";
 
 // ─── Argument parsing ──────────────────────────────────────────────────────────
 
 interface CliArgs {
-  command: "interactive" | "run" | "doctor";
+  command: "interactive" | "run" | "task" | "resume" | "status" | "doctor";
   task?: string;
+  checks: string[];
   provider?: string;
   model?: string;
   cwd?: string;
@@ -23,7 +34,7 @@ interface CliArgs {
 
 function parseArgs(argv: string[]): CliArgs {
   const args = argv.slice(2);
-  const result: CliArgs = { command: "interactive" };
+  const result: CliArgs = { command: "interactive", checks: [] };
 
   let i = 0;
   while (i < args.length) {
@@ -31,6 +42,15 @@ function parseArgs(argv: string[]): CliArgs {
     switch (arg) {
       case "run":
         result.command = "run";
+        break;
+      case "task":
+        result.command = "task";
+        break;
+      case "resume":
+        result.command = "resume";
+        break;
+      case "status":
+        result.command = "status";
         break;
       case "doctor":
         result.command = "doctor";
@@ -44,6 +64,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "--cwd":
         result.cwd = args[++i];
         break;
+      case "--check":
+        result.checks.push(args[++i]);
+        break;
       case "--help":
       case "-h":
         printHelp();
@@ -54,8 +77,8 @@ function parseArgs(argv: string[]): CliArgs {
           console.error(`Unknown option: ${arg}`);
           process.exit(1);
         }
-        if (result.command === "run" && !result.task) {
-          result.task = arg;
+        if (result.task === undefined && (result.command === "run" || result.command === "task" || result.command === "resume" || result.command === "status")) {
+          result.task = arg; // goal for run/task; task id for resume/status
         } else {
           console.error(`Unexpected argument: ${arg}`);
           process.exit(1);
@@ -74,13 +97,17 @@ piharness — Lean Pi Coding Harness
 
 Usage:
   harness                        Start interactive session
-  harness run "task description" Run a one-shot task
+  harness run "task description" Run a one-shot task (no controller)
+  harness task "goal"            Managed task with acceptance checks
+  harness resume [id]            Resume an active managed task
+  harness status [id]            Show task state (default: active task)
   harness doctor                 Check configuration and backend
 
 Options:
   --provider <id>    Model provider (default: local)
   --model <id>       Model id (default: qwen38)
   --cwd <dir>        Working directory (default: .)
+  --check "d|cmd"    Acceptance check: description, optional |verification command (repeatable)
   -h, --help         Show this help
 `);
 }
@@ -182,6 +209,109 @@ async function runTask(config: HarnessConfig, task: string): Promise<void> {
 }
 
 // ─── Interactive session ───────────────────────────────────────────────────────
+
+// ─── Managed tasks (M2 task controller) ─────────────────────────────────────
+
+function parseCheck(raw: string, index: number): TaskCheck {
+  const sep = raw.indexOf("|");
+  const description = (sep === -1 ? raw : raw.slice(0, sep)).trim();
+  const command = sep === -1 ? undefined : raw.slice(sep + 1).trim() || undefined;
+  if (!description) {
+    console.error(`Invalid --check: "${raw}" (need a non-empty description)`);
+    process.exit(1);
+  }
+  return { id: `c${index + 1}`, description, command };
+}
+
+function resolveTask(config: HarnessConfig, id?: string) {
+  if (id) return loadTask(config.cwd, id);
+  return findActiveTask(config.cwd);
+}
+
+async function runManagedTask(
+  config: HarnessConfig,
+  goal: string,
+  checks: TaskCheck[],
+  resumeId?: string,
+): Promise<void> {
+  const mode = resumeId ? `resume ${resumeId}` : "new task";
+  console.error(`\x1b[90mManaged ${mode}: ${goal}\x1b[0m`);
+  console.error(`\x1b[90mModel: ${config.provider}/${config.model} | CWD: ${config.cwd}\x1b[0m`);
+  for (const c of checks) {
+    console.error(`\x1b[90mCheck ${c.id}: ${c.description}${c.command ? ` (verify: ${c.command})` : ""}\x1b[0m`);
+  }
+  console.error("");
+
+  // SIGINT: mark the active record cancelled so a later `harness resume` sees it.
+  const onSigint = () => {
+    const active = findActiveTask(config.cwd);
+    if (active && (!resumeId || active.id === resumeId)) {
+      active.phase = "cancelled";
+      active.outcome = "Cancelled by user (SIGINT).";
+      active.nextAction = "Re-run with: harness resume " + active.id;
+      saveTask(config.cwd, active);
+    }
+    console.error("\n\x1b[33mCancelled — aborting...\x1b[0m");
+    process.exit(130);
+  };
+  process.on("SIGINT", onSigint);
+
+  try {
+    const result = await controllerRunTask({
+      workspace: config.cwd,
+      goal,
+      checks,
+      limits: {
+        maxToolCalls: config.maxToolCalls,
+        maxTaskMinutes: config.maxTaskMinutes,
+        maxRepairCycles: config.maxRepairCycles,
+      },
+      model: `${config.provider}/${config.model}`,
+      resumeId,
+      createSession: async (_prompt) =>
+        createHarnessSession({
+          cwd: config.cwd,
+          provider: config.provider,
+          model: config.model,
+          thinkingLevel: config.thinkingLevel,
+        }),
+      runPrompt: async (session, prompt) => {
+        const before = session.getSessionStats().toolCalls;
+        const handler = createStreamHandler(true);
+        const unsub = session.subscribe(handler);
+        try {
+          await session.prompt(prompt);
+          await session.waitForIdle();
+        } finally {
+          unsub();
+        }
+        const after = session.getSessionStats().toolCalls;
+        return { toolCalls: Math.max(0, after - before) };
+      },
+      disposeSession: (session) => session.dispose(),
+      runCheck: async (check) => {
+        if (!check.command) return { ok: true, output: "no command" };
+        try {
+          const out = execFileSync("/bin/sh", ["-c", check.command], {
+            cwd: config.cwd,
+            timeout: 120_000,
+            maxBuffer: 1024 * 1024,
+            encoding: "utf-8",
+          });
+          return { ok: true, output: out.slice(-4000) };
+        } catch (err) {
+          return { ok: false, output: String(err).slice(-4000) };
+        }
+      },
+    });
+
+    console.error("\n\x1b[90m─── Managed task finished ───\x1b[0m");
+    console.log(formatStatus(result.record));
+    process.exitCode = result.record.phase === "completed" ? 0 : 1;
+  } finally {
+    process.off("SIGINT", onSigint);
+  }
+}
 
 async function runInteractive(config: HarnessConfig): Promise<void> {
   const readline = await import("node:readline/promises");
@@ -323,6 +453,42 @@ async function main(): Promise<void> {
       }
       await runTask(config, args.task);
       break;
+    case "task": {
+      if (!args.task) {
+        console.error('Usage: harness task "goal" [--check "description|command" ...]');
+        process.exit(1);
+      }
+      const checks = args.checks.map((c, i) => parseCheck(c, i));
+      await runManagedTask(config, args.task, checks);
+      break;
+    }
+    case "resume": {
+      const record = resolveTask(config, args.task);
+      if (!record) {
+        console.error("Nothing to resume (no active task).");
+        process.exit(1);
+      }
+      await runManagedTask(config, record.goal, record.checks, record.id);
+      break;
+    }
+    case "status": {
+      const record = resolveTask(config, args.task);
+      if (!record) {
+        const ids = listTaskIds(config.cwd);
+        console.log(ids.length ? "No active task." : "No tasks recorded.");
+        for (const id of ids) {
+          try {
+            const rec = loadTask(config.cwd, id);
+            console.log(`  ${id}  ${rec.phase}  ${rec.goal.slice(0, 60)}`);
+          } catch {
+            console.log(`  ${id}  (unreadable)`);
+          }
+        }
+        break;
+      }
+      console.log(formatStatus(record));
+      break;
+    }
     case "doctor":
       await runDoctor(config);
       break;
