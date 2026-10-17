@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "PIHARNESS_AGENT_DIR=$(mktemp -d) tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

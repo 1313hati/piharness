@@ -1,10 +1,12 @@
 /**
- * Approved project skills: procedures at `.harness/skills/<name>/SKILL.md`.
- * Only skills in this directory are discoverable; unapproved proposals live
- * in `.harness/state/proposals/` and are never listed here (M4 boundary).
+ * Approved skills: procedures at `.harness/skills/<name>/SKILL.md` (this
+ * project) and `<agentDir>/skills/<name>/SKILL.md` (every project).
+ * Only approved dirs are discoverable; unapproved proposals live in
+ * `.harness/state/proposals/` and are never listed here (M4 boundary).
  */
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 export interface SkillSummary {
@@ -21,6 +23,17 @@ export interface SkillSummary {
 
 export function skillsRoot(workspace: string): string {
   return join(workspace, ".harness", "skills");
+}
+
+/**
+ * Skills that apply everywhere. Mirrors the agent dir (PIHARNESS_AGENT_DIR,
+ * else ~/.config/piharness/agent) so the CLI, the TUI and the tests agree
+ * without this module importing the Pi layer.
+ */
+export function globalSkillsRoot(): string {
+  const override = process.env.PIHARNESS_AGENT_DIR;
+  const dir = override && override.trim() ? override : join(homedir(), ".config", "piharness", "agent");
+  return join(dir, "skills");
 }
 
 function parseSkillMd(name: string, body: string, path: string): SkillSummary {
@@ -50,9 +63,7 @@ function parseSkillMd(name: string, body: string, path: string): SkillSummary {
   return { name, title, description, body, path };
 }
 
-/** List approved skills. Missing skills dir → empty list. */
-export function listSkills(workspace: string): SkillSummary[] {
-  const root = skillsRoot(workspace);
+function readSkillsIn(root: string): SkillSummary[] {
   if (!existsSync(root)) return [];
   const out: SkillSummary[] = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
@@ -65,5 +76,18 @@ export function listSkills(workspace: string): SkillSummary[] {
       // Unreadable SKILL.md: skip; selection must never fail the task.
     }
   }
-  return out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+
+/**
+ * List approved skills: project first, then global ones this project does not
+ * override (a project skill with the same name wins).
+ */
+export function listSkills(workspace: string): SkillSummary[] {
+  const byName = new Map<string, SkillSummary>();
+  for (const skill of readSkillsIn(skillsRoot(workspace))) byName.set(skill.name, skill);
+  for (const skill of readSkillsIn(globalSkillsRoot())) {
+    if (!byName.has(skill.name)) byName.set(skill.name, skill);
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }

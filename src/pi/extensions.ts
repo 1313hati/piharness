@@ -8,6 +8,7 @@
  */
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import { buildSkillsBlock } from "../context/index.js";
 import { renderHarnessContext } from "../extensions/builtin.js";
 import { clampText, type HarnessExtension, type HarnessTool } from "../extensions/types.js";
 
@@ -24,6 +25,8 @@ const WORKING_RULES = [
   "- For a file longer than ~150 lines, write the first part, then append the rest with edit calls. One tool call that overruns the output budget is rejected and wastes the turn.",
   "- When a command fails, fix the cause the error names, not the symptom.",
   "- No placeholders, no TODO stubs, no \"rest of the implementation here\".",
+  "- Before writing code that depends on numbers (positions, sizes, timing, physics), compute them with a one-line command and look at the result. If a probe contradicts your reasoning, the probe is right.",
+  "- Work that needs more than a few tool calls starts with a todo list, and the list is updated as items finish. Do not hold a multi-step plan only in your head.",
 ].join("\n");
 
 export interface InlineExtensionDeps {
@@ -72,6 +75,18 @@ export function harnessInlineExtensions(
         }
         pi.on("before_agent_start", (event) => {
           const blocks: string[] = [renderHarnessContext(deps)];
+          // Approved skills are matched against what the user actually asked
+          // for, every turn: a skill learned in another project is only useful
+          // if it can be reached from the TUI, not just from `piharness run`.
+          const prompt = "prompt" in event && typeof event.prompt === "string" ? event.prompt : "";
+          if (prompt.trim()) {
+            try {
+              const skills = buildSkillsBlock(deps.cwd, prompt);
+              if (skills) blocks.push(skills);
+            } catch {
+              // skills are advisory: never fail the turn over them
+            }
+          }
           for (const fn of contextFns) {
             try {
               const extra = fn();

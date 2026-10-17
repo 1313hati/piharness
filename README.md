@@ -81,6 +81,39 @@ one small adapter (`src/pi/extensions.ts`). Pi extension modules dropped into
   editing, smallest diff, run the tests/build after changes, split long files
   into write-then-append, fix the cause the error names, no placeholder code.
 
+## Skills that apply everywhere
+
+A skill is a short procedure — the moves that worked, the traps that cost a
+turn — stored as `SKILL.md`. Two places hold them:
+
+- `.harness/skills/<name>/SKILL.md` — this project. A project skill wins over a
+  global one with the same name.
+- `<agent dir>/skills/<name>/SKILL.md` (`~/.config/piharness/agent/skills`) —
+  every project on the machine. Learned once, available everywhere.
+
+They are matched against each message as it is submitted, so relevance is
+decided per turn rather than injected wholesale: the best two matches go into
+the system prompt, capped at ~1400 tokens. That keeps the prompt lean on a small
+local model and still puts the right procedure in front of it when the work
+matches. `piharness skill list` shows what is installed and where it came from;
+`piharness skill show <name>` prints the procedure.
+
+The shipped global set covers the behaviour that is hardest to get right:
+
+- `measure-first` — compute positions, sizes and timings with a command before
+  writing code that depends on them; trace the run instead of rewriting code.
+- `minimal-diff` — state the cause, change the least, keep the diff reviewable,
+  no placeholders and no unasked-for abstractions.
+- `verify-before-claim` — a change is done when a command's output shows the
+  behaviour; separate verified, changed and unverified in the report.
+
+Write your own by creating the directory and the file — no registration step:
+
+```bash
+mkdir -p ~/.config/piharness/agent/skills/my-procedure
+$EDITOR ~/.config/piharness/agent/skills/my-procedure/SKILL.md
+```
+
 ## Watching it work
 
 Every phase of a turn has something moving on screen:
@@ -248,7 +281,7 @@ docs/progress.md      Current milestone, evidence, next action
 
 ## Status
 
-See [docs/progress.md](docs/progress.md) for what has been built and [docs/roadmap.md](docs/roadmap.md) for what is worth building next. M0–M11 are done with 121/121 tests and clean typecheck/build. The whole loop has run against the real local model (`local/qwen38`, Qwen3.8 27B UD-Q4_K_XL on llama.cpp): managed tasks complete with passing checks, both eval arms pass a scenario, and a skill learned from a completed task is proposed, evaluated, promoted and then observed in a later run's injected context. The A/B arm difference is not yet statistically meaningful (one run per arm) — see the M8 section for the honest reading. M9 adds packaging (`piharness` command, isolated agent dir) and the black/orange TUI; M10 grows the benchmark to four scenarios and twelve runs per arm — see the saturation caveat there. M11 adds compaction, the extension layer (persistent todos/memory, keyless web access, LSP-free code navigation) and live runtime statistics.
+See [docs/progress.md](docs/progress.md) for what has been built and [docs/roadmap.md](docs/roadmap.md) for what is worth building next. M0–M17 are done with 157/157 tests and clean typecheck/build. The whole loop has run against the real local model (`local/qwen38`, Qwen3.8 27B UD-Q4_K_XL on llama.cpp): managed tasks complete with passing checks, both eval arms pass a scenario, and a skill learned from a completed task is proposed, evaluated, promoted and then observed in a later run's injected context. The A/B arm difference is not yet statistically meaningful (one run per arm) — see the M8 section for the honest reading. M9 adds packaging (`piharness` command, isolated agent dir) and the black/orange TUI; M10 grows the benchmark to four scenarios and twelve runs per arm — see the saturation caveat there. M11 adds compaction, the extension layer (persistent todos/memory, keyless web access, LSP-free code navigation) and live runtime statistics.
 
 ## Trust model
 

@@ -12,6 +12,8 @@ export interface SelectionBudgets {
   memoryTokens?: number;
   /** Token cap for the skills section (default 2000). */
   skillTokens?: number;
+  /** Maximum matched skills (default 3). */
+  maxSkills?: number;
 }
 
 export interface SelectedFact {
@@ -101,7 +103,7 @@ export function selectContext(
     }))
     .filter((s) => s.score > 0)
     .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
-    .slice(0, MAX_SKILLS);
+    .slice(0, Math.max(1, budgets?.maxSkills ?? MAX_SKILLS));
 
   const skillsOut: SelectedSkill[] = [];
   let skillTokens = 0;

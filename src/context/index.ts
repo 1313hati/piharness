@@ -27,6 +27,22 @@ export function buildContextBlock(
 }
 
 /**
+ * Only the skills selected for a goal, with no memory section.
+ *
+ * The interactive session already injects memory and todos itself; this is
+ * what makes approved skills reach the TUI, where there is no composed prompt
+ * to prepend to.
+ */
+export function buildSkillsBlock(
+  workspace: string,
+  goal: string,
+  budgets: SelectionBudgets = { skillTokens: 1400, maxSkills: 2 },
+): string {
+  const empty: Memory = { version: 1, facts: [] };
+  return renderSelection(goal, empty, listSkills(workspace), budgets);
+}
+
+/**
  * Render a selection as a markdown block. Exported for tests.
  */
 export function renderSelection(
@@ -51,7 +67,7 @@ export function renderSelection(
       const body = skill.body.replace(/^\s*#\s+.+\n+/, "").trim();
       return `### ${skill.name}: ${skill.title}\n${body}`;
     });
-    parts.push(`Relevant skills (from .harness/skills/ — follow them where applicable):\n${blocks.join("\n\n")}`);
+    parts.push(`Relevant skills (project .harness/skills/ and the global skills dir — follow them where they apply):\n${blocks.join("\n\n")}`);
   }
   if (parts.length === 0) return "";
   return parts.join("\n\n");

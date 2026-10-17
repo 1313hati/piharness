@@ -727,3 +727,24 @@ separate region parked at the bottom of the screen, disconnected from the flow.
 - Real run, 100x40, `/home/hati/code/mario`: `⋯ reasoning` followed immediately
   by `The user is asking me to look at game.js, propose …` while the footer
   still showed `generating · 58 t/s`, then the tool row and the answer below it.
+
+## M17: skills that reach the interactive session
+
+The learning loop from M12 wrote skills into `.harness/skills`, and the headless
+`run`/`task` paths injected the matches — but the TUI session never did. Every
+skill the harness learned was invisible in the place the user actually works,
+which is why "better skills" had produced no visible change in behaviour.
+
+- `before_agent_start` now matches the approved skills against the prompt being
+  submitted (`buildSkillsBlock`), so relevance is decided per turn. Measured
+  cost: 460–850 tokens for the two best matches, capped at 1400.
+- Global skills: `<agentDir>/skills` is merged with the project's, project wins
+  on a name clash. The default set (`measure-first`, `minimal-diff`,
+  `verify-before-claim`) is written for the failure modes that actually cost
+  turns here, not for one domain.
+- `WORKING_RULES` gained two lines: compute numbers before coding them, and
+  start multi-step work with a todo list.
+- `npm test` now runs with a scratch `PIHARNESS_AGENT_DIR`; without it, the real
+  global skills leaked into tests that assert an empty context (7 failures).
+- Tests: 157 (5 new in `tests/skills-global.test.ts`, including the
+  `before_agent_start` wiring itself).
