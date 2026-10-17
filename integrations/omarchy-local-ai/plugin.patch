@@ -87,10 +87,10 @@ index 7b6208d..47424f5 100644
        Item {
 diff --git i/bin/omarchy-local-ai-coder w/bin/omarchy-local-ai-coder
 new file mode 100755
-index 0000000..f5de333
+index 0000000..ad667a9
 --- /dev/null
 +++ w/bin/omarchy-local-ai-coder
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,324 @@
 +#!/usr/bin/env python3
 +"""Local integration: share coder.sh's native server with the Local AI panel."""
 +import contextlib
@@ -98,6 +98,7 @@ index 0000000..f5de333
 +import json
 +import os
 +from pathlib import Path
++import datetime
 +import subprocess
 +import sys
 +import time
@@ -174,6 +175,7 @@ index 0000000..f5de333
 +        last = speed
 +    if task is not None and prev.get('task') != task:
 +        requests += 1
++    account(prompt, out, task, prev)
 +
 +    try:
 +        STATE.mkdir(parents=True, exist_ok=True)
@@ -196,6 +198,103 @@ index 0000000..f5de333
 +        'requests': requests,
 +        'task': task,
 +    }
++
++
++
++USAGE = STATE / 'usage.json'
++
++
++def _load_usage():
++    try:
++        data = json.loads(USAGE.read_text())
++        if isinstance(data.get('days'), dict):
++            return data
++    except (OSError, ValueError):
++        pass
++    return {'days': {}}
++
++
++def account(prompt, out, task, prev):
++    """Add what this task has produced to a per-day ledger.
++
++    The calendar grid needs history, and llama-server keeps none: it reports the
++    live task only. Each task id is remembered the first time it is seen (its
++    prompt and one request), and output is counted by delta afterwards, so a
++    task that started before the panel was opened is still counted once.
++    """
++    if task is None:
++        return
++    data = _load_usage()
++    seen = data.setdefault('seen', {})
++    day = time.strftime('%Y-%m-%d')
++    rec = data['days'].setdefault(day, {'in': 0, 'out': 0, 'requests': 0})
++    changed = False
++    key = str(task)
++    if key not in seen:
++        rec['in'] += prompt
++        rec['out'] += out
++        rec['requests'] += 1
++        seen[key] = out
++        changed = True
++    elif out > int(seen[key]):
++        rec['out'] += out - int(seen[key])
++        seen[key] = out
++        changed = True
++    if changed:
++        # keep the ledger small: the last 200 tasks are enough to avoid recounts
++        if len(seen) > 200:
++            for k in list(seen)[:-200]:
++                del seen[k]
++        try:
++            STATE.mkdir(parents=True, exist_ok=True)
++            USAGE.write_text(json.dumps(data))
++        except OSError:
++            pass
++
++
++def merge_usage(s):
++    """Fold the ledger into the snapshot's lifetime, so the calendar grid counts
++    the local server as well as the gateway."""
++    data = _load_usage()
++    days_by_date = data.get('days') or {}
++    if not days_by_date:
++        return s
++    life = dict(s.get('life') or {})
++    theirs = list(life.get('days') or [])
++    theirs_req = int(life.get('requests') or 0)
++    start = float(life.get('start') or 0)
++
++    dates = sorted(days_by_date)
++    first = datetime.date.fromisoformat(dates[0])
++    base = datetime.date.fromtimestamp(start) if start else first
++    theirs_start = base
++    if first < base:
++        base = first
++    last = datetime.date.today()
++    n = max(1, (last - base).days + 1)
++    series = [0] * n
++    # the backend's own days end today, so they right-align
++    for i, v in enumerate(theirs):
++        idx = n - len(theirs) + i
++        if 0 <= idx < n:
++            series[idx] += int(v or 0)
++    req = theirs_req
++    for d in dates:
++        rec = days_by_date[d]
++        idx = (datetime.date.fromisoformat(d) - base).days
++        if 0 <= idx < n:
++            series[idx] += int(rec.get('in') or 0) + int(rec.get('out') or 0)
++            req += int(rec.get('requests') or 0)
++
++    life['start'] = int(datetime.datetime.combine(base, datetime.time()).timestamp())
++    life['today'] = n - 1
++    life['days'] = series
++    life['requests'] = req
++    if not life.get('since') and req:
++        life['since'] = (theirs_start if start else base).strftime('%b %-d')
++    s['life'] = life
++    s['total'] = sum(series)
++    return s
 +
 +
 +def native_state():
@@ -281,6 +380,7 @@ index 0000000..f5de333
 +        s = snapshot()
 +        c = native_state()
 +        s['coder'] = c
++        s = merge_usage(s)
 +        if c['pid']:
 +            for g in s.get('gpus', []):
 +                if g.get('key') in KEYS:

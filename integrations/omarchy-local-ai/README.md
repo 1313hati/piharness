@@ -37,3 +37,26 @@ QML caches imported JavaScript for the life of the shell, so after editing
 The speed row is the fourth row of the home section (`⚡ speed`), and the Local AI
 icon in the bar repeats it as a tooltip, so the number is readable without
 opening the panel.
+
+## The calendar grid
+
+The home grid and its `N tokens · N requests` totals normally count gateway
+requests only, so a llama-server started by `coder.sh` left it empty. The
+wrapper now keeps its own per-day ledger in `~/.local/state/coder/usage.json`:
+
+- every `snapshot` samples `/slots`; a task id seen for the first time adds its
+  prompt tokens and one request, later samples add the output delta. This is
+  server-side, so every client counts — piharness, Hermes, curl, anything.
+- `merge_usage` folds those days into the snapshot's `life`/`total`, right
+  aligned to today, and adds the request counts.
+- `backfill-from-sessions.py` seeds history from piharness session logs
+  (`input + cacheRead` in, `output` out, one request per assistant message),
+  skipping sessions touched in the last 15 minutes so the live sampling is not
+  double counted. Run it once:
+
+```bash
+python3 backfill-from-sessions.py
+```
+
+Prompt tokens include the cached prefix, which is why a coding session shows
+millions: every turn re-processes the whole context on this server.
