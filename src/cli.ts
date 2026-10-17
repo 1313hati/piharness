@@ -91,6 +91,7 @@ interface CliArgs {
   clear?: boolean;
   /** Evidence needed before auto-promotion (default 2). */
   minEvidence?: number;
+  thinkingLevel?: HarnessConfig["thinkingLevel"];
   /** interactive: force the line REPL instead of the TUI. */
   plain?: boolean;
 }
@@ -187,6 +188,16 @@ function parseArgs(argv: string[]): CliArgs {
         result.minEvidence = v;
         break;
       }
+      case "--thinking": {
+        const v = args[++i];
+        const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+        if (!levels.includes(v)) {
+          console.error(`--thinking must be one of ${levels.join("|")}`);
+          process.exit(1);
+        }
+        result.thinkingLevel = v as HarnessConfig["thinkingLevel"];
+        break;
+      }
       case "--plain":
         result.plain = true;
         break;
@@ -269,6 +280,7 @@ Options:
   --provider <id>    Model provider (default: local)
   --model <id>       Model id (default: qwen38)
   --cwd <dir>        Working directory (default: .)
+  --thinking <level> Reasoning: off|minimal|low|medium|high|xhigh|max (default: medium)
   --check "d|cmd"    Acceptance check: description, optional |verification command
   --tag <t>          Tag for memory add (repeatable)
   --source <s>       Source for memory add: user|verified
@@ -1310,6 +1322,7 @@ async function main(): Promise<void> {
       provider: args.provider,
       model: args.model,
       cwd: args.cwd,
+      thinkingLevel: args.thinkingLevel,
     } as Partial<HarnessConfig>,
     args.cwd ?? process.cwd(),
   );

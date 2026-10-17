@@ -83,15 +83,24 @@ one small adapter (`src/pi/extensions.ts`). Pi extension modules dropped into
 
 ## Watching it work
 
-The TUI is meant to answer "is it alive?" without guesswork:
+Every phase of a turn has something moving on screen:
 
-- the footer ticks every half second and always shows what is happening —
-  `waiting for first token`, `generating`, or `⚙ bash` — plus decode speed,
-  tokens streamed this turn, and an idle/stalled counter when nothing arrives
-- streaming text and reasoning appear as they are produced; thinking is dimmed
-- a tool call shows its diff (`- old` / `+ new`) while it runs, and bash/tool
-  output fills in live instead of appearing only at the end
-- the terminal title mirrors the state (`piharness · generating · 12.4 t/s`)
+- `waiting for first token` plus a server-side `prefill 18k` counter — read from
+  llama-server's `/slots`. This is the phase where the model chews through the
+  prompt and Pi has nothing to draw; the counter proves it is working, not hung.
+- `⋯ reasoning` with the model's thinking streamed underneath it as it comes,
+  in muted grey. Not a summary, not a spinner: the actual text, updating.
+- `generating` with `t/s` and `+N tok` while the answer itself streams.
+- `⚙ <tool>` then `✓ <tool> 0.2s` with an inline preview: `-`/`+` lines for
+  edits, the head of a file for writes, the first lines of output for bash.
+- The terminal title carries `piharness · generating · 12.4 t/s`, so even a
+  minimised window shows life.
+- `piharness ps` (or `watch -n1 piharness ps`) reports the same state from
+  another terminal, including a stale-pid warning if the TUI died.
+
+If a turn looks silent, `PIHARNESS_TRACE_EVENTS=/tmp/trace.jsonl piharness`
+records every event Pi emitted with a timestamp. That separates "the harness
+is not rendering it" from "the model never sent it".
 
 From another terminal:
 

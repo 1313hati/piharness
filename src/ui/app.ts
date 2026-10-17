@@ -21,7 +21,7 @@
  * terminal, the session wiring, and the key bindings.
  */
 
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import {
   Editor,
   type EditorTheme,
@@ -54,6 +54,7 @@ import {
   formatTokens,
 } from "./stats.js";
 import { startGpuSampler } from "./gpu.js";
+import { formatProgress, sampleServer, type ServerProgress } from "./server.js";
 import { clearLiveState, writeLiveState } from "./live.js";
 import { defaultAgentDir } from "../pi/agent-dir.js";
 import { addTodo, completeTodo, loadTodos, removeTodo, renderTodos } from "../extensions/todo.js";
@@ -110,6 +111,7 @@ class StatusLine implements Component {
       rate?: string;
       context?: string;
       gpu?: string;
+      server?: string;
       activity?: string;
       stream?: string;
       idle?: string;
@@ -196,6 +198,10 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
   let closed = false;
   const meter = new StreamMeter();
   let gpuInfo: GpuInfo | null = null;
+  let serverInfo: ServerProgress | null = null;
+  // The server meter exists to cover the silent prefill. Once tokens are
+  // actually on screen it is noise, and its counters can be stale.
+  let turnSawOutput = false;
   let lastTurnOutputTokens: number | null = null;
   let stopGpu: () => void = () => {};
   /** Duration of the last finished turn, so the footer doesn't snap back to 0.0s. */
@@ -229,6 +235,7 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
       rate: formatRate(meter.rate()),
       context: formatContext(contextInfo()),
       gpu: formatGpu(gpuInfo),
+      server: serverInfo ? formatProgress(serverInfo) : "",
       activity: turn && !turn.finalised
         ? currentTool
           ? `⚙ ${currentTool}`
@@ -295,13 +302,38 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
     refreshStatus();
   };
 
+  // PIHARNESS_TRACE_EVENTS=<file> records what Pi actually emitted, with
+  // timestamps. It is the difference between "the harness is not rendering"
+  // and "the model never sent it" when a turn looks silent.
+  const tracePath = process.env.PIHARNESS_TRACE_EVENTS;
+  const trace = (event: NormalizedEvent) => {
+    if (!tracePath) return;
+    try {
+      appendFileSync(
+        tracePath,
+        `${JSON.stringify({
+          t: Date.now(),
+          type: event.type,
+          chars: "text" in event ? event.text.length : undefined,
+          tool: "toolName" in event ? event.toolName : undefined,
+        })}\n`,
+      );
+    } catch {
+      // tracing must never break a session
+    }
+  };
+
   const onEvent = (event: NormalizedEvent) => {
     lastEventAt = Date.now();
+    trace(event);
     switch (event.type) {
       case "agent_start":
+        turnSawOutput = false;
+        serverInfo = null;
         beginTurn();
         break;
       case "thinking_delta": {
+        turnSawOutput = true;
         // Thinking tokens count towards t/s: with a reasoning model most of
         // the generation happens here, and ignoring it made the meter idle.
         meter.delta(event.text);
@@ -316,6 +348,7 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
         break;
       }
       case "text_delta": {
+        turnSawOutput = true;
         if (!turn) break;
         meter.delta(event.text);
         if (turn.assistantIndex === null) {
@@ -637,6 +670,20 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
   const settings = loadSettings(options.agentDir ?? defaultAgentDir());
 
   // Keep the elapsed clock and the GPU meter moving.
+  // Sample the model server while a turn is live: this is the only signal that
+  // moves during prefill, before Pi has a single token to render.
+  const serverTimer = setInterval(() => {
+    if (!turn || !status || turnSawOutput) {
+      serverInfo = null;
+      return;
+    }
+    void sampleServer().then((p) => {
+      if (p) serverInfo = p;
+      else if (serverInfo) serverInfo = null;
+    });
+  }, 700);
+  serverTimer.unref?.();
+
   if (settings.ui.gpu) stopGpu = startGpuSampler({
     onSample: (gpu) => {
       gpuInfo = gpu;

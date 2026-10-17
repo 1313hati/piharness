@@ -156,9 +156,19 @@ function renderAssistant(block: AssistantBlock, width: number, p: Palette): stri
   return out;
 }
 
+/**
+ * Reasoning is shown, not summarised: the whole point of streaming it is that
+ * a long turn is visibly *working* rather than silently stuck. It stays
+ * visually subordinate (muted, no bullet chrome) but readable — plain `muted`
+ * instead of `dim(muted)`, which on a near-black background was invisible.
+ */
 function renderThinking(block: ThinkingBlock, width: number, p: Palette): string[] {
-  const body = wrap(block.text, Math.max(1, width - 4));
-  return body.map((l, i) => dim(fg(p.muted, `${i === 0 ? "· " : "  "}${l}`)));
+  const body = wrap(block.text.trimEnd(), Math.max(1, width - 4));
+  if (body.length === 0) return [];
+  const head = fg(p.accentSoft, "⋯ ") + fg(p.muted, "reasoning");
+  const out = [truncateToWidth(head, width, "…")];
+  for (const line of body) out.push(fg(p.muted, `  ${line}`));
+  return out;
 }
 
 export function renderTool(block: ToolBlock, width: number, p: Palette): string[] {
@@ -284,6 +294,8 @@ export interface StatusInfo {
   activity?: string;
   /** Tokens streamed this turn (estimate), e.g. "+412 tok". */
   stream?: string;
+  /** Server-side progress, e.g. "prefill 2k/3k" or "412 tok". */
+  server?: string;
   /** Time since the last event, e.g. "idle 6s" / "stalled 31s". */
   idle?: string;
   /** Animated busy glyph (◐◓◑◒) so a slow turn still looks alive. */
@@ -304,7 +316,7 @@ export function renderStatus(info: StatusInfo, width: number, p: Palette): strin
   const pinnedSegs = [info.activity, info.rate].filter(
     (s): s is string => typeof s === "string" && s.length > 0,
   );
-  const optional = [info.stream, info.idle, info.context, `tokens ${info.tokens}`, info.gpu].filter(
+  const optional = [info.server, info.stream, info.idle, info.context, `tokens ${info.tokens}`, info.gpu].filter(
     (s): s is string => typeof s === "string" && s.length > 0,
   );
   const base = [`${dot} ${info.busy ? "working" : "ready"}`, `tools ${info.toolCalls}`,

@@ -640,3 +640,59 @@ on a large file, and "make it smarter / better coder".
   the old speed at the old quality.
 - No benchmark evidence yet that medium reasoning lifts eval pass rate: the
   existing four scenarios are saturated (51/51 both arms).
+
+## M15: reasoning always visible, prefill counter, coder.sh/plugin entry (2026-10-17)
+
+**What the user still saw**
+
+"it just writes me milestones … i want most of live process to be shown and its
+reasoning like hermes". Two real causes, one of them in the data:
+
+- His last sessions (`--home-hati-code-mario--`, 21:42 and 22:00, 77 rows, 37
+  tool calls) contain **zero `thinking` parts**: they ran before reasoning was
+  switched on, so the model emitted tool calls and almost no prose. Tool rows
+  were literally all he saw.
+- The thinking renderer existed but used `dim(muted)` on a near-black
+  background — barely legible — with no label. It read as chrome, not content.
+
+**Changes**
+
+- `renderThinking` is now labelled `⋯ reasoning` and renders body text in plain
+  `muted` (not dimmed), so the thought stream is readable while it grows.
+- `src/ui/server.ts`: samples llama-server `/slots` every 700 ms while a turn
+  is live and before any token arrives, surfacing `prefill 18k` in the footer.
+  This is the only moving number during a long prompt prefill, where Pi has
+  nothing to render. Stale slot totals are ignored (no "prefill 0k/45k"), and
+  the meter disappears as soon as real output starts.
+- `PIHARNESS_TRACE_EVENTS=<file>` records every normalized event with a
+  timestamp, so "silent turn" can be attributed to the model or the renderer.
+- `--thinking <level>` CLI flag (the TUI already had `/think`).
+- `~/coder.sh` gains `piharness` as agent 4 (menu renumbered: 5 start, 6 stop),
+  syncing the server's real context window into the harness catalog under a
+  file lock before launch, and passing `--thinking`.
+- The Omarchy `sero.local-ai` plugin gains a `piharness` button and
+  `coder-piharness` route.
+
+**Checks**
+
+- `npm test` 149 pass / 0 fail (`tests/server.test.ts`: busy-slot parsing,
+  idle → null, single-object payload, prefill formatting thresholds, env URL).
+- Real run, 100x40, `local/qwen38`, cwd `/home/hati/code/mario`:
+  `◑ working · tools 0 · waiting for first token · prefill 18k · 0.8s` climbing
+  to `prefill 20k`, then `⋯ reasoning`, then `generating · 27 t/s`, then
+  `⚙ read` and `✓ read /home/hati/code/mario/level.js 0.0s`.
+- Trace on the same build: `thinking_delta` first arrives 7.6 s after
+  `agent_start`, then streams continuously — proving the harness renders every
+  chunk Pi sends.
+- `bash coder.sh piharness --version` → `piharness 0.1.0` (catalog sync + warm
+  server reuse, no restart). `node --check Model.js`, plugin `test/agents-test.sh`
+  pass.
+
+**Honest limits**
+
+- Prefill at ~20k tokens took ~45 s on this box; the counter now makes that
+  visible but does not make it faster. A smaller repo map / less memory context
+  is the lever.
+- `/slots` reports the whole server, not "this TUI's request". With a second
+  client on the same llama-server the counter can describe the other one.
+- Reasoning makes turns longer: `/think low` trades depth for latency.
