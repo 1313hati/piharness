@@ -39,6 +39,8 @@ import {
   renderBanner,
   renderStatus,
   renderTranscript,
+  wrap,
+  breakLines,
 } from "./blocks.js";
 import { BLACK_ORANGE, type Palette, bold, fg, maybeDisableForPipe, setColorEnabled } from "./theme.js";
 import {
@@ -86,6 +88,9 @@ interface TurnState {
   startedAt: number;
   assistantIndex: number | null;
   thinkingIndex: number | null;
+  /** Unwrapped reasoning tail that has not become a printed line yet. */
+  thinkingBuf: string;
+  thinkingHead: boolean;
   finalised: boolean;
 }
 
@@ -257,7 +262,14 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
   };
 
   const beginTurn = () => {
-    turn = { startedAt: Date.now(), assistantIndex: null, thinkingIndex: null, finalised: false };
+    turn = {
+      startedAt: Date.now(),
+      assistantIndex: null,
+      thinkingIndex: null,
+      thinkingBuf: "",
+      thinkingHead: false,
+      finalised: false,
+    };
     lastTurnStart = turn.startedAt;
     toolBlocks = new Map();
     toolStarted = new Map();
@@ -281,21 +293,7 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
       const block = transcript.blocks[turn.assistantIndex];
       if (block?.kind === "assistant") block.streaming = false;
     }
-    if (turn.thinkingIndex !== null) {
-      const block = transcript.blocks[turn.thinkingIndex];
-      if (block?.kind === "thinking") {
-        const chars = block.text.trim().length;
-        if (chars > 0) {
-          transcript.blocks[turn.thinkingIndex] = {
-            kind: "notice",
-            level: "info",
-            text: `thought ${chars} chars`,
-          };
-        } else {
-          transcript.blocks.splice(turn.thinkingIndex, 1);
-        }
-      }
-    }
+    flushThinking(true);
     turn.finalised = true;
     if (aborted) push({ kind: "notice", level: "info", text: "cancelled" });
     turn = null;
@@ -323,6 +321,34 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
     }
   };
 
+  /**
+   * Reasoning is printed as it is produced, one immutable line at a time, in
+   * transcript order — no growing block, no summary notice at the end, nothing
+   * to scroll back to. Wrapping happens here because a printed line can never
+   * be reflowed later.
+   */
+  const thinkingWidth = () => Math.max(20, (process.stdout.columns ?? 100) - 4);
+
+  /**
+   * Reasoning is printed as it is produced, one immutable line at a time, in
+   * transcript order — no growing block, no summary notice at the end, nothing
+   * to scroll back to. Wrapping happens here because a printed line can never
+   * be reflowed later.
+   */
+  const flushThinking = (all: boolean) => {
+    if (!turn) return;
+    const width = thinkingWidth();
+    const { lines, rest } = breakLines(turn.thinkingBuf, width);
+    for (const line of lines) push({ kind: "thinkingLine", text: line });
+    turn.thinkingBuf = rest;
+    if (all && rest.trim()) {
+      for (const line of wrap(rest, width)) push({ kind: "thinkingLine", text: line });
+      turn.thinkingBuf = "";
+    }
+    transcript.invalidate();
+    tui.requestRender();
+  };
+
   const onEvent = (event: NormalizedEvent) => {
     lastEventAt = Date.now();
     trace(event);
@@ -338,12 +364,12 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
         // the generation happens here, and ignoring it made the meter idle.
         meter.delta(event.text);
         if (!turn) break;
-        if (turn.thinkingIndex === null) {
-          turn.thinkingIndex = push({ kind: "thinking", text: event.text });
-        } else {
-          const block = transcript.blocks[turn.thinkingIndex];
-          if (block.kind === "thinking") block.text += event.text;
+        if (!turn.thinkingHead) {
+          push({ kind: "thinkingHead" });
+          turn.thinkingHead = true;
         }
+        turn.thinkingBuf += event.text;
+        flushThinking(false);
         refreshStatus();
         break;
       }

@@ -696,3 +696,34 @@ reasoning like hermes". Two real causes, one of them in the data:
 - `/slots` reports the whole server, not "this TUI's request". With a second
   client on the same llama-server the counter can describe the other one.
 - Reasoning makes turns longer: `/think low` trades depth for latency.
+
+## M16: reasoning is appended line by line, not one growing block (2026-10-17)
+
+**What the user saw**
+
+"it has reasoning like separate section at very bottom so i have to always
+scroll up … i want to have it like hermes linear completely".
+
+The old renderer kept one `thinking` block and appended to its `text` on every
+delta. A block that grows has to be redrawn *above* the cursor on every frame;
+pi-tui's main-screen mode redraws the changed tail, so the thought looked like a
+separate region parked at the bottom of the screen, disconnected from the flow.
+
+**Change**
+
+- Reasoning now arrives as immutable `thinkingLine` blocks, wrapped and printed
+  as they are produced (`breakLines`: newline first, then width at the last
+  space), with a single `⋯ reasoning` head per assistant message.
+- No blank lines inside a reasoning run; no "thought N chars" replacement at
+  message end — the tail is flushed as ordinary lines instead.
+- Nothing above the cursor is ever rewritten, so the transcript is strictly
+  append-only: user → reasoning → tool rows → answer, in the order it happened.
+
+**Checks**
+
+- 152 tests pass; new coverage: `breakLines` emits complete lines without
+  waiting for a newline, keeps explicit newlines, loses no words; head/line/
+  answer render in order and never exceed width.
+- Real run, 100x40, `/home/hati/code/mario`: `⋯ reasoning` followed immediately
+  by `The user is asking me to look at game.js, propose …` while the footer
+  still showed `generating · 58 t/s`, then the tool row and the answer below it.

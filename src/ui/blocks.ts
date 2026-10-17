@@ -27,6 +27,24 @@ export interface ThinkingBlock {
   text: string;
 }
 
+/**
+ * One already-wrapped reasoning line. Reasoning is emitted as immutable lines
+ * rather than one growing block: a block that keeps getting taller has to be
+ * redrawn above the cursor, which is what made the transcript look like it had
+ * a separate reasoning pane and forced scrolling. Appended lines never change
+ * once printed — the same shape Hermes uses.
+ */
+export interface ThinkingLineBlock {
+  kind: "thinkingLine";
+  text: string;
+}
+
+/** The `⋯ reasoning` label above a run of thinking lines. */
+export interface ThinkingHeadBlock {
+  kind: "thinkingHead";
+  suppressed?: boolean;
+}
+
 export interface ToolBlock {
   kind: "tool";
   name: string;
@@ -56,6 +74,8 @@ export type TranscriptBlock =
   | UserBlock
   | AssistantBlock
   | ThinkingBlock
+  | ThinkingLineBlock
+  | ThinkingHeadBlock
   | ToolBlock
   | NoticeBlock;
 
@@ -70,7 +90,31 @@ export function emptyTranscript(): TranscriptBlock[] {
 
 // ─── small text helpers ─────────────────────────────────────────────────────
 
-function wrap(text: string, width: number): string[] {
+/**
+ * Split streamed prose into printable lines without waiting for a newline.
+ * Returns the lines that are complete at this width plus the tail to keep
+ * buffering. A reasoning model streams one long paragraph, so breaking on
+ * width (at a space when possible) is what makes the thought appear live.
+ */
+export function breakLines(text: string, width: number): { lines: string[]; rest: string } {
+  const lines: string[] = [];
+  let buf = text;
+  let nl = buf.indexOf("\n");
+  while (nl !== -1) {
+    if (buf.slice(0, nl).trim()) lines.push(buf.slice(0, nl));
+    buf = buf.slice(nl + 1);
+    nl = buf.indexOf("\n");
+  }
+  while (buf.length > width) {
+    const space = buf.lastIndexOf(" ", width);
+    const at = space > width * 0.5 ? space : width;
+    if (buf.slice(0, at).trim()) lines.push(buf.slice(0, at));
+    buf = buf.slice(at).replace(/^ +/, "");
+  }
+  return { lines, rest: buf };
+}
+
+export function wrap(text: string, width: number): string[] {
   if (width <= 0) return [];
   const out: string[] = [];
   for (const raw of text.replace(/\r\n/g, "\n").split("\n")) {
@@ -223,6 +267,12 @@ export function renderBlock(block: TranscriptBlock, width: number, p: Palette): 
       return renderAssistant(block, width, p);
     case "thinking":
       return renderThinking(block, width, p);
+    case "thinkingHead":
+      return [truncateToWidth(fg(p.accentSoft, "⋯ ") + fg(p.muted, "reasoning"), width, "…")];
+    case "thinkingLine": {
+      const line = fg(p.muted, `  ${block.text}`);
+      return [visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line];
+    }
     case "tool":
       return renderTool(block, width, p);
     case "notice":
@@ -239,7 +289,14 @@ export function renderTranscript(blocks: TranscriptBlock[], width: number, p: Pa
   blocks.forEach((block, i) => {
     if (i > 0) {
       const prev = blocks[i - 1];
-      if (!(prev.kind === "tool" && block.kind === "tool")) out.push("");
+      // Reasoning reads as one continuous, tight paragraph: no blank lines
+      // between its header and its lines, or between consecutive lines.
+      const tight =
+        (prev.kind === "tool" && block.kind === "tool") ||
+        (prev.kind === "thinkingLine" && block.kind === "thinkingLine") ||
+        (prev.kind === "thinkingHead" && block.kind === "thinkingLine") ||
+        (prev.kind === "thinkingHead" && block.kind === "thinkingHead");
+      if (!tight) out.push("");
     }
     out.push(...renderBlock(block, width, p));
   });

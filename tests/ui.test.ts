@@ -3,13 +3,16 @@ import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { previewFromArgs, summarizeArgs, summarizeResult } from "../src/ui/app.js";
 import {
+  breakLines,
   renderAssistantText,
   renderBanner,
   renderStatus,
   renderTool,
   renderTranscript,
   renderUser,
+  type TranscriptBlock,
 } from "../src/ui/blocks.js";
+import { BLACK_ORANGE } from "../src/ui/theme.js";
 import { BLACK_ORANGE, bg, fg, padTo, setColorEnabled } from "../src/ui/theme.js";
 
 const P = BLACK_ORANGE;
@@ -157,4 +160,36 @@ test("status: left state, right hint, exact width", () => {
   assert.ok(line.includes("tools 3"));
   assert.ok(line.includes("4.2s"));
   assert.ok(line.includes("/help  /quit"));
+});
+
+test("breakLines: streamed prose becomes lines without waiting for a newline", () => {
+  // A reasoning model emits one long paragraph; every complete line must be
+  // printable immediately or the thought stays invisible until the turn ends.
+  const text = "one two three four five six seven eight nine ten eleven twelve";
+  const { lines, rest } = breakLines(text, 24);
+  assert.ok(lines.length >= 2, `expected several lines, got ${JSON.stringify(lines)}`);
+  for (const line of lines) assert.ok(visibleWidth(line) <= 24, `line too wide: ${line}`);
+  // Nothing is lost: lines + rest rejoin to the original words.
+  assert.equal([...lines, rest].join(" ").replace(/\s+/g, " "), text);
+});
+
+test("breakLines: explicit newlines are kept, and a short tail is buffered", () => {
+  const { lines, rest } = breakLines("first thought\nsecond thought\nstill typ", 60);
+  assert.deepEqual(lines, ["first thought", "second thought"]);
+  assert.equal(rest, "still typ");
+});
+
+test("thinkingHead and thinkingLine render in transcript order, never over width", () => {
+  const blocks: TranscriptBlock[] = [
+    { kind: "thinkingHead" },
+    { kind: "thinkingLine", text: "a short thought" },
+    { kind: "assistant", text: "answer", streaming: false },
+  ];
+  const out = renderTranscript(blocks, 40, BLACK_ORANGE);
+  const plain = out.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  const head = plain.findIndex((l) => l.includes("reasoning"));
+  const lineIdx = plain.findIndex((l) => l.includes("a short thought"));
+  const answerIdx = plain.findIndex((l) => l.includes("answer"));
+  assert.ok(head >= 0 && lineIdx > head && answerIdx > lineIdx, plain.join("|"));
+  for (const l of out) assert.ok(visibleWidth(l) <= 40);
 });

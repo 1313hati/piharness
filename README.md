@@ -88,8 +88,10 @@ Every phase of a turn has something moving on screen:
 - `waiting for first token` plus a server-side `prefill 18k` counter — read from
   llama-server's `/slots`. This is the phase where the model chews through the
   prompt and Pi has nothing to draw; the counter proves it is working, not hung.
-- `⋯ reasoning` with the model's thinking streamed underneath it as it comes,
-  in muted grey. Not a summary, not a spinner: the actual text, updating.
+- `⋯ reasoning` with the model's thinking printed underneath it, line by line,
+  in muted grey, in transcript order. Each line is appended once and never
+  rewritten, so the transcript stays linear: no collapsed "thought N chars"
+  summary, no reasoning pane pinned to the bottom, nothing to scroll back for.
 - `generating` with `t/s` and `+N tok` while the answer itself streams.
 - `⚙ <tool>` then `✓ <tool> 0.2s` with an inline preview: `-`/`+` lines for
   edits, the head of a file for writes, the first lines of output for bash.
