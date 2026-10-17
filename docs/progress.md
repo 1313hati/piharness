@@ -162,6 +162,35 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 - Start the endpoint, run `harness eval run offbyone-fix`, confirm `PASS` and that `work/src/sum.ts` holds the fix; record the manifest here and flip M5 to DONE.
 - Then M6: scoreboard — append every manifest to a single `evals/history.jsonl` and add `harness eval score` comparing pass rate / tool calls / repair cycles across runs, which is what makes "gets better at recurring work" checkable over time.
 
+## M6: scoreboard — append-only history + `eval score` — CODE COMPLETE (2026-10-17)
+
+**Implemented behavior**
+- `src/eval/history.ts`: every scenario run appends one JSON line to `.harness/state/evals/history.jsonl` (`at`, `scenario`, `passed`, `phase`, `toolCalls`, `repairCycles`, `seconds`, `model`, `runDir`). Manifests stay the per-run source of truth; the history file exists so trends do not require walking directories. Append is best effort — a read-only `.harness` cannot turn a finished run into a failure.
+- `readHistory` skips malformed/truncated lines and re-types missing counters to `0`, so one bad write cannot make the rest of the history unreadable. `summarizeHistory` aggregates per scenario: runs, passed, pass rate, best/avg tool calls, best duration, and the most recent entry.
+- `runScenario` appends in the same `finally` that writes the manifest, so a crashed run is scored too.
+- CLI `harness eval score [name]` prints the aggregate plus the last run's timestamp, outcome, model and evidence path.
+- `history.ts` imports `ScenarioManifest` as a type-only import on purpose: a value import from `runner.ts` would be a runtime cycle since `runner.ts` imports `appendHistory`.
+
+**Commands/checks and outcomes**
+- `npm run typecheck` → clean; `npm run build` → clean; `npm test` → 76/76 pass (4 new history tests: append format/round-trip, missing file + malformed lines, aggregation maths, and a real `runScenario` appending itself).
+- Real CLI run, then score:
+  ```
+  node dist/cli.js eval run offbyone-fix   → FAIL, exit 1, evidence .harness/state/evals/offbyone-fix-mvcn7tfc
+  node dist/cli.js eval score              → offbyone-fix | runs 1  passed 0 (0%)  best tools 0  avg tools 0.0  best 28.7s
+                                             last: … FAIL phase=failed local/qwen38
+  node dist/cli.js eval score offbyone-fix → identical (filter path)
+  ```
+  `history.jsonl` holds exactly one line, matching the manifest.
+
+**Known limitation**
+- The scoreboard measures, but there is still nothing to compare: the only recorded run is the blocked one (`0%`, 0 tool calls, backend unreachable).
+- Averaging tool calls across failed runs that never called a tool pulls the average toward zero; a nicer statistic (passed-runs-only cost) needs a decision, not a guess.
+- `seconds` is wall-clock including fixture copy and check execution, not model time.
+
+**Next action**
+- Unblock the backend, then `eval run --all` twice: the second run's history line proves the loop records comparable evidence (pass rate, cost per run).
+- Then M7: use the scoreboard for the actual product claim — run `offbyone-fix` with and without the learned skill promoted in M4 and compare pass rate/cost, i.e. evidence that learning helps rather than an assertion.
+
 ## M1 evidence (2026-10-17)
 
 **Implemented behavior**

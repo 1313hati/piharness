@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { join, relative } from "node:path";
 import { atomicWriteJson } from "../fsutil.js";
 import { listSkills } from "../context/skills.js";
+import { appendHistory } from "./history.js";
 import type { RunResult } from "../task/controller.js";
 import type { TaskBudgets, TaskCheck, TaskLimits } from "../task/types.js";
 import { EvalError, type Scenario } from "./scenarios.js";
@@ -184,6 +185,7 @@ export async function runScenario(opts: {
   } finally {
     manifest.durationMs = now() - startMs;
     atomicWriteJson(join(runDir, "manifest.json"), manifest);
+    appendHistory(repoRoot, manifest, relative(repoRoot, runDir));
   }
 
   return { manifest, runDir };

@@ -10,7 +10,7 @@
  *   harness status [id]        Show task state (or the active task)
  *   harness memory <list|add|remove>   Manage project memory facts (M3)
  *   harness skill <propose|list|show|evaluate|approve|reject>   Learning service (M4)
- *   harness eval <list|run>    Evaluation scenarios (M5)
+ *   harness eval <list|run|score>   Evaluation scenarios and history (M5/M6)
  *   harness doctor             Configuration/backend diagnostics
  */
 
@@ -44,7 +44,9 @@ import {
   EvalError,
   findScenario,
   listScenarios,
+  readHistory,
   runScenario,
+  summarizeHistory,
   type ScenarioRunner,
 } from "./eval/index.js";
 
@@ -187,6 +189,7 @@ Usage:
   harness eval run <name>        Run one scenario into .harness/state/evals/
   harness eval run --all         Run every scenario
   harness eval run <name> --dry-run   Validate a scenario without calling a model
+  harness eval score [name]      Pass rate and cost across recorded runs
   harness doctor                 Check configuration and backend
 
 Options:
@@ -550,8 +553,33 @@ async function runEval(config: HarnessConfig, args: CliArgs): Promise<void> {
       console.log(`\n${scenarios.length} scenario(s) in evals/scenarios/`);
       return;
     }
+    if (sub === "score") {
+      const entries = readHistory(repoRoot);
+      if (entries.length === 0) {
+        console.log("No evaluation history yet (run: harness eval run <name>).");
+        return;
+      }
+      const filtered = name ? entries.filter((e) => e.scenario === name) : entries;
+      const summaries = summarizeHistory(filtered);
+      if (summaries.length === 0) {
+        console.error(`No history for scenario ${name}.`);
+        process.exit(1);
+      }
+      for (const s of summaries) {
+        console.log(s.scenario);
+        console.log(
+          `  runs ${s.runs}  passed ${s.passed} (${Math.round(s.passRate * 100)}%)  ` +
+            `best tools ${s.bestToolCalls}  avg tools ${s.avgToolCalls.toFixed(1)}  best ${s.bestSeconds}s`,
+        );
+        console.log(
+          `  last: ${s.last.at}  ${s.last.passed ? "PASS" : "FAIL"}  phase=${s.last.phase}  ${s.last.model}`,
+        );
+        console.log(`  evidence: ${s.last.runDir}`);
+      }
+      return;
+    }
     if (sub !== "run") {
-      console.error("Usage: harness eval list | run <name> | run --all [--dry-run]");
+      console.error("Usage: harness eval list | run <name> | run --all | score [name] [--dry-run]");
       process.exit(1);
     }
 
