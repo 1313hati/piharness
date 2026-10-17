@@ -15,6 +15,7 @@ import {
   listProposals,
   renderSkillMd,
   slugifyGoal,
+  titleFromGoal,
   validateProposalName,
   evaluateProposal,
   evalsRoot,
@@ -26,6 +27,23 @@ import {
 import { newTaskRecord } from "../src/task/types.ts";
 import type { TaskRecord } from "../src/task/types.ts";
 import { listSkills } from "../src/context/index.ts";
+
+test("titleFromGoal: readable title, no mid-word cut", () => {
+  // Observed bug: a 120-char slice produced a title ending "…Report both results. Do not".
+  const long =
+    "Verify this project's quality gates in this order: run 'npm run typecheck', then 'npm test'. Report both results. Do not modify any files.";
+  const t = titleFromGoal(long);
+  assert.ok(t.length <= 73, `title too long: ${t.length}`);
+  assert.match(t, /…$/, "truncation is marked");
+  assert.doesNotMatch(t, /\s$/, "does not end on whitespace");
+  // The retained text must be whole words from the goal.
+  const kept = t.replace(/…$/, "");
+  assert.ok(long.startsWith(kept), "kept prefix is verbatim");
+  assert.match(kept, /[\w'’)]$/, "ends on a word, not punctuation or a fragment");
+  // Short goals pass through untouched.
+  assert.equal(titleFromGoal("Fix the sum bug."), "Fix the sum bug.");
+  assert.equal(titleFromGoal("Fix the sum bug"), "Fix the sum bug");
+});
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "piharness-skill-"));

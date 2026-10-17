@@ -111,6 +111,11 @@ test("history: summarize computes pass rate and cost per scenario", () => {
   assert.equal(a.last.runDir, "r3", "last entry is the most recent append");
   assert.equal(b.runs, 1);
   assert.equal(b.passRate, 0);
+  // b's only run never called a tool (backend unreachable): no cost data,
+  // and definitely not "best tools 0".
+  assert.equal(b.bestToolCalls, null);
+  assert.equal(b.avgToolCalls, null);
+  assert.equal(b.bestSeconds, null);
   assert.equal(b.last.phase, "error");
 });
 

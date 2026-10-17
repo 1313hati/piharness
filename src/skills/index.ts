@@ -27,6 +27,7 @@ export {
   saveProposal,
   renderSkillMd,
   slugifyGoal,
+  titleFromGoal,
   proposeFromTask,
 } from "./proposals.js";
 

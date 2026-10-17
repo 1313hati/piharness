@@ -33,9 +33,15 @@ export interface ScenarioSummary {
   runs: number;
   passed: number;
   passRate: number;
-  bestToolCalls: number;
-  avgToolCalls: number;
-  bestSeconds: number;
+  /**
+   * Cost statistics only over runs that actually called a tool. A run that
+   * never reached the backend records 0 tool calls and ~30s of connect
+   * retries; including it made "best tools" read 0, which looks like a free
+   * perfect run instead of a broken one. `null` = no run has cost data.
+   */
+  bestToolCalls: number | null;
+  avgToolCalls: number | null;
+  bestSeconds: number | null;
   last: HistoryEntry;
 }
 
@@ -119,17 +125,19 @@ export function summarizeHistory(entries: HistoryEntry[]): ScenarioSummary[] {
   const summaries: ScenarioSummary[] = [];
   for (const { scenario, variant, runs } of byKey.values()) {
     const passed = runs.filter((r) => r.passed).length;
-    const toolCalls = runs.map((r) => r.toolCalls);
-    const seconds = runs.map((r) => r.seconds);
+    const worked = runs.filter((r) => r.toolCalls > 0);
+    const toolCalls = worked.map((r) => r.toolCalls);
+    const seconds = worked.map((r) => r.seconds);
     summaries.push({
       scenario,
       variant,
       runs: runs.length,
       passed,
       passRate: passed / runs.length,
-      bestToolCalls: Math.min(...toolCalls),
-      avgToolCalls: toolCalls.reduce((a, b) => a + b, 0) / runs.length,
-      bestSeconds: Math.min(...seconds),
+      bestToolCalls: toolCalls.length > 0 ? Math.min(...toolCalls) : null,
+      avgToolCalls:
+        toolCalls.length > 0 ? toolCalls.reduce((a, b) => a + b, 0) / toolCalls.length : null,
+      bestSeconds: seconds.length > 0 ? Math.min(...seconds) : null,
       last: runs[runs.length - 1],
     });
   }

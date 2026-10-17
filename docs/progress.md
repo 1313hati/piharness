@@ -88,7 +88,7 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 **Next action**
 - M4: learning service (`src/skills/`) — propose new skills from completed tasks, store under `.harness/state/proposals/`, approve into `.harness/skills/`.
 
-## M4: learning service — propose → evaluate → promote — CODE COMPLETE (2026-10-17)
+## M4: learning service — propose → evaluate → promote — DONE (2026-10-17)
 
 **Implemented behavior**
 - `src/skills/types.ts`: `SkillProposal` schema v1 (name, title, description, body, sourceTaskId, verifyCommands, status proposed/approved/rejected, evalResult, timestamps), `SkillError`.
@@ -125,7 +125,7 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 **Next action**
 - M5: evaluation harness — run scenarios from `evals/scenarios/` and record evidence.
 
-## M5: evaluation harness — scenario runner — CODE COMPLETE (2026-10-17)
+## M5: evaluation harness — scenario runner — DONE (2026-10-17)
 
 **Implemented behavior**
 - `evals/scenarios/*.json` is the scenario format: `name`, `description`, `fixture` (resolved relative to the scenario file), `goal`, `checks[]` (`description` + optional `command`), optional `limits` (`maxToolCalls`, `maxTaskMinutes`, `maxRepairCycles`). Shipped scenario: `evals/scenarios/offbyone-fix.json` over `evals/fixtures/offbyone`.
@@ -162,7 +162,7 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 - Start the endpoint, run `harness eval run offbyone-fix`, confirm `PASS` and that `work/src/sum.ts` holds the fix; record the manifest here and flip M5 to DONE.
 - Then M6: scoreboard — append every manifest to a single `evals/history.jsonl` and add `harness eval score` comparing pass rate / tool calls / repair cycles across runs, which is what makes "gets better at recurring work" checkable over time.
 
-## M6: scoreboard — append-only history + `eval score` — CODE COMPLETE (2026-10-17)
+## M6: scoreboard — append-only history + `eval score` — DONE (2026-10-17)
 
 **Implemented behavior**
 - `src/eval/history.ts`: every scenario run appends one JSON line to `.harness/state/evals/history.jsonl` (`at`, `scenario`, `passed`, `phase`, `toolCalls`, `repairCycles`, `seconds`, `model`, `runDir`). Manifests stay the per-run source of truth; the history file exists so trends do not require walking directories. Append is best effort — a read-only `.harness` cannot turn a finished run into a failure.
@@ -191,7 +191,7 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 - Unblock the backend, then `eval run --all` twice: the second run's history line proves the loop records comparable evidence (pass rate, cost per run).
 - Then M7: use the scoreboard for the actual product claim — run `offbyone-fix` with and without the learned skill promoted in M4 and compare pass rate/cost, i.e. evidence that learning helps rather than an assertion.
 
-## M7: A/B arms — measure the skills, not just the run — CODE COMPLETE (2026-10-17)
+## M7: A/B arms — measure the skills, not just the run — DONE (2026-10-17)
 
 **Implemented behavior**
 - A run now belongs to a `variant`. `skills` (default) copies `.harness/skills/` into the run workspace; `no-skills` (`--no-skills`) copies `memory.json` but no procedures. The arm is a property of the *workspace*, not a flag inside the context service — so the injected context is genuinely absent rather than rendered-then-filtered, and nothing in `src/context/` needs to know evaluations exist.
@@ -246,3 +246,38 @@ Remaining M1 gap (interactive mode unexercised against live model) carried in M2
 
 **Next action**
 - M2: task controller (`src/task/`), state persistence with atomic writes, resume with workspace reconciliation.
+
+## M8: real-model evidence — the learning loop closes (2026-10-17)
+
+**Backend (user-mandated, no substitute models)**
+- `local/qwen38` = Qwen3.8 27B UD-Q4_K_XL GGUF (27,320,697,856 params, `Q4_K - Medium`, 17.5 GB) served by the user's own `~/coder.sh --start` llama.cpp build on `http://127.0.0.1:8080/v1`, `n_ctx_slot = 65536`, one slot, Jinja Qwen template.
+- An Ollama server + `qwen2.5-coder:7b` / `qwen3:8b` stand-in was installed earlier in the session while the real model was being located. It was stopped and is not used: no run in this repo was ever recorded against it, and `~/.pi/agent/models.json` keeps only `qwen38` for provider `local`.
+- Tool calling verified directly: `POST /v1/chat/completions` with one `write` tool → `tool_calls[0].function = {"name":"write","arguments":"{\"path\":\"hi.txt\",\"content\":\"hi\"}"}`.
+
+**Real runs (all `local/qwen38`, all recorded under `.harness/state/evals/`)**
+| what | result |
+| --- | --- |
+| managed task `hello.txt` (2 tool calls) | `phase=completed`, check `test -f hello.txt` PASS |
+| managed task "verify the gates" in repo root (2 tool calls) | `phase=completed`, `npm run typecheck && npm test` PASS |
+| `eval run offbyone-fix` — skills arm | PASS, `tools=4`, `repairs=0`, 7.2 s, `changedPaths=["src/sum.ts"]` |
+| `eval run offbyone-fix --no-skills` — baseline arm | PASS, `tools=4`, `repairs=0`, 8.7 s, `changedPaths=["src/sum.ts"]` |
+| `skill propose` → `skill evaluate` → `skill approve` on the gate task | proposal → `PASS npm run typecheck && npm test` → promoted to `.harness/skills/verify-this-project-s-quality-gates-in-this-orde/SKILL.md` |
+| `eval run offbyone-fix` again, after promotion | PASS, `tools=4`, `contextSkills=["verify-this-project-s-quality-gates-in-this-orde"]` — the learned skill is really injected |
+| `eval score` | two arms reported separately, per-arm pass count and cost |
+
+**Honest reading of the A/B result**
+- Both arms pass with the same 4 tool calls. One scenario with one run per arm proves *injection and bookkeeping*, not yet that skills make the model better; that needs many runs per arm and harder scenarios. The scoreboard is the instrument for that, not the proof itself.
+- Pre-backend runs remain in `history.jsonl` as `phase=failed`, `tools=0`. They are counted in `runs` and `passed` but excluded from cost statistics (see fix below).
+
+**Bugs found only by running the real thing**
+- Manifests carried no `changedPaths`; every run looked like it touched nothing. Now recorded from the task record (`[]` for no-change runs).
+- `eval score` reported `best tools 0` because runs that never reached the backend record `0` tool calls; `Math.min` over them made a dead run look like a free perfect run. Cost stats (best/avg tools, best seconds) now cover only runs with `toolCalls > 0`, and print `—` when there are none.
+- Skill titles were a hard `slice(0, 120)` of the goal, so the first promoted skill was titled `... Report both results. Do not`. `titleFromGoal` now takes the first sentence and cuts at a word boundary with an ellipsis (regression test in `tests/skills.test.ts`).
+
+**Commands/checks and outcomes**
+- `npm run typecheck` → clean; `npm run build` → clean; `npm test` → 79/79 pass.
+- `harness doctor` → provider `local`, model `qwen38` resolved.
+- Fixture integrity: `evals/fixtures/offbyone/src/sum.ts` still contains the bug (`i < n`); every fix landed in a run workspace.
+
+**Next action**
+- Grow the scenario set (2–3 more fixtures: multi-file refactor, failing-check repair, memory-dependent task) and run each arm N≥10 times to get pass rates with intervals. Only then is a skills-vs-baseline claim defensible.

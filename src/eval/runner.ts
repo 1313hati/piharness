@@ -56,6 +56,8 @@ export interface ScenarioManifest {
   /** Skills that were available in the run workspace (injected context). */
   contextSkills: string[];
   validationResults: string[];
+  /** Files the run touched, relative to the run workspace. */
+  changedPaths?: string[];
   outcome?: string;
 }
 
@@ -196,6 +198,7 @@ export async function runScenario(opts: {
     manifest.taskId = result.record.id;
     manifest.budgets = result.record.budgets;
     manifest.validationResults = result.record.validationResults;
+    manifest.changedPaths = result.record.changedPaths ?? [];
     if (result.record.outcome) manifest.outcome = result.record.outcome;
   } catch (e) {
     manifest.outcome = `runner error: ${(e as Error).message}`;

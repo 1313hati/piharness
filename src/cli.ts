@@ -575,10 +575,14 @@ async function runEval(config: HarnessConfig, args: CliArgs): Promise<void> {
         process.exit(1);
       }
       for (const s of summaries) {
+        // `—` means "no run produced cost data" (e.g. every run failed to reach
+        // the backend) — printing 0 there reads as a perfect free run.
+        const num = (v: number | null, digits = 0) =>
+          v === null ? "—" : digits > 0 ? v.toFixed(digits) : String(v);
         console.log(`${s.scenario} [${s.variant}]`);
         console.log(
           `  runs ${s.runs}  passed ${s.passed} (${Math.round(s.passRate * 100)}%)  ` +
-            `best tools ${s.bestToolCalls}  avg tools ${s.avgToolCalls.toFixed(1)}  best ${s.bestSeconds}s`,
+            `best tools ${num(s.bestToolCalls)}  avg tools ${num(s.avgToolCalls, 1)}  best ${num(s.bestSeconds)}s`,
         );
         console.log(
           `  last: ${s.last.at}  ${s.last.passed ? "PASS" : "FAIL"}  phase=${s.last.phase}  ${s.last.model}`,

@@ -92,7 +92,7 @@ docs/progress.md      Current milestone, evidence, next action
 
 ## Status
 
-See [docs/progress.md](docs/progress.md). M0–M7 are code-complete with 78/78 tests and clean typecheck/build; every real-model run (M4 learning smoke, M5/M6 scenarios) is still blocked on a reachable local endpoint.
+See [docs/progress.md](docs/progress.md). M0–M8 are done with 79/79 tests and clean typecheck/build. The whole loop has run against the real local model (`local/qwen38`, Qwen3.8 27B UD-Q4_K_XL on llama.cpp): managed tasks complete with passing checks, both eval arms pass a scenario, and a skill learned from a completed task is proposed, evaluated, promoted and then observed in a later run's injected context. The A/B arm difference is not yet statistically meaningful (one run per arm) — see the M8 section for the honest reading.
 
 ## Trust model
 

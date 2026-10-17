@@ -80,8 +80,23 @@ export function renderSkillMd(p: SkillProposal): string {
 }
 
 /**
- * Derive a deterministic slug from a task goal.
+ * A skill title the model and the human can both read. The goal is used
+ * verbatim up to its first sentence, then cut at a word boundary: a hard
+ * `slice` produced titles like "... Report both results. Do not" that end
+ * mid-sentence in the injected context.
  */
+export function titleFromGoal(goal: string, max = 72): string {
+  const flat = goal.replace(/\s+/g, " ").trim();
+  const firstSentence = flat.match(/^.{1,200}?[.!?](?=\s|$)/)?.[0] ?? flat;
+  if (firstSentence.length <= max) return firstSentence;
+  const cut = firstSentence
+    .slice(0, max)
+    .replace(/\s+\S*$/, "")
+    .replace(/[,;:\-–—]+$/, "");
+  return `${cut || firstSentence.slice(0, max)}…`;
+}
+
+/** Derive a deterministic slug from a task goal. */
 export function slugifyGoal(goal: string): string {
   const slug = goal
     .toLowerCase()
@@ -152,7 +167,7 @@ export function proposeFromTask(
   const p: SkillProposal = {
     schemaVersion: PROPOSAL_SCHEMA_VERSION,
     name,
-    title: task.goal.trim().slice(0, 120),
+    title: titleFromGoal(task.goal),
     description: `Procedure learned from completed task ${task.id}.`,
     body,
     sourceTaskId: task.id,
