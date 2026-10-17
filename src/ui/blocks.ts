@@ -147,7 +147,12 @@ function renderAssistant(block: AssistantBlock, width: number, p: Palette): stri
   const glyph = fg(p.accentSoft, "│");
   const out = body.map((line, i) => (i === 0 ? `${glyph} ${line}` : `  ${line}`));
   // Streaming cursor: only the last line, so it reads as an insertion point.
-  if (block.streaming && out.length > 0) out[out.length - 1] += fg(p.accent, "▌");
+  if (block.streaming && out.length > 0) {
+    // The caret costs a column: reserve it instead of overflowing the terminal
+    // (pi-tui throws when any rendered line is wider than the viewport).
+    const last = out.length - 1;
+    out[last] = truncateToWidth(out[last], Math.max(1, width - 1), "…") + fg(p.accent, "▌");
+  }
   return out;
 }
 
@@ -228,7 +233,9 @@ export function renderTranscript(blocks: TranscriptBlock[], width: number, p: Pa
     }
     out.push(...renderBlock(block, width, p));
   });
-  return out;
+  // Safety net: a single wide line kills the whole TUI, so nothing leaves this
+  // module wider than the viewport, whatever a block or palette does.
+  return out.map((line) => (visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line));
 }
 
 // ─── chrome ─────────────────────────────────────────────────────────────────

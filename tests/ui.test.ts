@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { previewFromArgs, summarizeArgs, summarizeResult } from "../src/ui/app.js";
 import {
+  renderAssistantText,
   renderBanner,
   renderStatus,
   renderTool,
@@ -126,6 +127,15 @@ test("banner: orange wordmark, model on the right, full width", () => {
   assert.ok(lines[0].includes("\x1b[48;2;255;138;31m"), "wordmark is an orange block");
   assert.ok(lines[0].includes("local/qwen38"));
   assert.ok(lines[1].includes("/work"));
+});
+
+test("streaming caret never pushes a line past the terminal width", () => {
+  const width = 60;
+  const long = "x".repeat(width + 20);
+  const lines = renderAssistantText("word ".repeat(40) + "▌", width, BLACK_ORANGE, true);
+  for (const line of lines) assert.ok(visibleWidth(line) <= width, `line too wide: ${visibleWidth(line)}`);
+  const exact = renderAssistantText("y".repeat(width), width, BLACK_ORANGE, true);
+  for (const line of exact) assert.ok(visibleWidth(line) <= width);
 });
 
 test("preview shows the diff a tool is about to apply", () => {
