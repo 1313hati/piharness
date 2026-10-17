@@ -91,6 +91,10 @@ turn — stored as `SKILL.md`. Two places hold them:
 - `<agent dir>/skills/<name>/SKILL.md` (`~/.config/piharness/agent/skills`) —
   every project on the machine. Learned once, available everywhere.
 
+The three below ship inside the package (`skills/`) and are copied into the agent
+dir on first run; a copy that already exists is never overwritten, so local edits
+survive an upgrade.
+
 They are matched against each message as it is submitted, so relevance is
 decided per turn rather than injected wholesale: the best two matches go into
 the system prompt, capped at ~1400 tokens. That keeps the prompt lean on a small
