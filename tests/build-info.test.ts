@@ -61,6 +61,13 @@ test("stale build: src newer than dist is reported", () => {
   assert.match(note, /npm run build/);
 });
 
+test("staleness under a minute reads in seconds, not 0m", () => {
+  const { entry, src } = tree(at("2026-10-18T12:20:00Z"), { "a.ts": at("2026-10-18T12:20:25Z") });
+  const stale = detectStaleBuild(entry, src);
+  assert.ok(stale);
+  assert.match(formatStaleBuild(stale), /25s older than src/);
+});
+
 test("fresh build: silent", () => {
   const { entry, src } = tree(at("2026-10-18T12:20:00Z"), {
     "ui/blocks.ts": at("2026-10-18T12:14:00Z"),

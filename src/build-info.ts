@@ -73,7 +73,8 @@ export function detectStaleBuild(entry: string, srcDir: string): StaleBuild | nu
 /** One line, no colour: this goes to stderr before the TUI takes the screen. */
 export function formatStaleBuild(stale: StaleBuild): string {
   const hours = stale.ageMs / 3_600_000;
-  const age = hours >= 1 ? `${hours.toFixed(1)}h` : `${Math.round(stale.ageMs / 60_000)}m`;
+  const age =
+    hours >= 1 ? `${hours.toFixed(1)}h` : stale.ageMs >= 60_000 ? `${Math.round(stale.ageMs / 60_000)}m` : `${Math.round(stale.ageMs / 1_000)}s`;
   return (
     `piharness: this build is ${age} older than src/ (${stale.newest}).\n` +
     `           You are running old UI — run \`npm run build\` to rebuild.`
