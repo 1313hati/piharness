@@ -35,13 +35,12 @@ import {
 import type { HarnessSession, NormalizedEvent, ThinkingLevel } from "../pi/session.js";
 import {
   PREVIEW_LINES,
+  TranscriptBuilder,
   type TranscriptBlock,
   type ToolBlock,
   renderBanner,
   renderStatus,
   renderTranscript,
-  wrap,
-  breakLines,
 } from "./blocks.js";
 import { BLACK_ORANGE, type Palette, bold, fg, maybeDisableForPipe, setColorEnabled } from "./theme.js";
 import {
@@ -87,20 +86,20 @@ export interface TuiOptions {
 
 interface TurnState {
   startedAt: number;
-  assistantIndex: number | null;
-  thinkingIndex: number | null;
-  /** Unwrapped reasoning tail that has not become a printed line yet. */
-  thinkingBuf: string;
-  thinkingHead: boolean;
   finalised: boolean;
 }
 
 /** A component that renders the transcript; the TUI diffs its output. */
 class TranscriptView implements Component {
-  blocks: TranscriptBlock[] = [];
-  constructor(private readonly palette: Palette) {}
+  constructor(
+    private readonly builder: TranscriptBuilder,
+    private readonly palette: Palette,
+  ) {}
+  get blocks(): TranscriptBlock[] {
+    return this.builder.blocks;
+  }
   render(width: number): string[] {
-    return renderTranscript(this.blocks, width, this.palette);
+    return renderTranscript(this.builder.blocks, width, this.palette);
   }
   invalidate(): void {}
 }
@@ -185,7 +184,8 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
 
   const terminal = options.terminal ?? new ProcessTerminal();
   const tui = new TuiMainScreen(terminal);
-  const transcript = new TranscriptView(palette);
+  const builder = new TranscriptBuilder();
+  const transcript = new TranscriptView(builder, palette);
   const status = new StatusLine(palette, {
     busy: false,
     toolCalls: 0,
@@ -277,20 +277,18 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
     tui.requestRender();
   };
 
-  const push = (block: TranscriptBlock): number => {
-    transcript.blocks.push(block);
-    return transcript.blocks.length - 1;
+  const push = (block: TranscriptBlock): void => {
+    builder.append(block);
+  };
+
+  const refreshView = () => {
+    transcript.invalidate();
+    tui.requestRender();
   };
 
   const beginTurn = () => {
-    turn = {
-      startedAt: Date.now(),
-      assistantIndex: null,
-      thinkingIndex: null,
-      thinkingBuf: "",
-      thinkingHead: false,
-      finalised: false,
-    };
+    turn = { startedAt: Date.now(), finalised: false };
+    builder.beginTurn();
     lastTurnStart = turn.startedAt;
     toolBlocks = new Map();
     toolStarted = new Map();
@@ -310,14 +308,11 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
     } catch {
       // keep the streaming estimate
     }
-    if (turn.assistantIndex !== null) {
-      const block = transcript.blocks[turn.assistantIndex];
-      if (block?.kind === "assistant") block.streaming = false;
-    }
-    flushThinking(true);
+    builder.end();
     turn.finalised = true;
     if (aborted) push({ kind: "notice", level: "info", text: "cancelled" });
     turn = null;
+    refreshView();
     refreshStatus();
   };
 
@@ -343,32 +338,11 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
   };
 
   /**
-   * Reasoning is printed as it is produced, one immutable line at a time, in
-   * transcript order — no growing block, no summary notice at the end, nothing
-   * to scroll back to. Wrapping happens here because a printed line can never
-   * be reflowed later.
+   * A printed line can never be reflowed later, so reasoning is wrapped at the
+   * width the terminal has right now. Ordering and flushing live in the
+   * builder; this only feeds it.
    */
   const thinkingWidth = () => Math.max(20, (process.stdout.columns ?? 100) - 4);
-
-  /**
-   * Reasoning is printed as it is produced, one immutable line at a time, in
-   * transcript order — no growing block, no summary notice at the end, nothing
-   * to scroll back to. Wrapping happens here because a printed line can never
-   * be reflowed later.
-   */
-  const flushThinking = (all: boolean) => {
-    if (!turn) return;
-    const width = thinkingWidth();
-    const { lines, rest } = breakLines(turn.thinkingBuf, width);
-    for (const line of lines) push({ kind: "thinkingLine", text: line });
-    turn.thinkingBuf = rest;
-    if (all && rest.trim()) {
-      for (const line of wrap(rest, width)) push({ kind: "thinkingLine", text: line });
-      turn.thinkingBuf = "";
-    }
-    transcript.invalidate();
-    tui.requestRender();
-  };
 
   const onEvent = (event: NormalizedEvent) => {
     lastEventAt = Date.now();
@@ -385,12 +359,8 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
         // the generation happens here, and ignoring it made the meter idle.
         meter.delta(event.text);
         if (!turn) break;
-        if (!turn.thinkingHead) {
-          push({ kind: "thinkingHead" });
-          turn.thinkingHead = true;
-        }
-        turn.thinkingBuf += event.text;
-        flushThinking(false);
+        builder.thinking(event.text, thinkingWidth());
+        refreshView();
         refreshStatus();
         break;
       }
@@ -398,12 +368,8 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
         turnSawOutput = true;
         if (!turn) break;
         meter.delta(event.text);
-        if (turn.assistantIndex === null) {
-          turn.assistantIndex = push({ kind: "assistant", text: event.text, streaming: true });
-        } else {
-          const block = transcript.blocks[turn.assistantIndex];
-          if (block.kind === "assistant") block.text += event.text;
-        }
+        builder.text(event.text);
+        refreshView();
         refreshStatus();
         break;
       }
@@ -433,6 +399,7 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
         if (lines.length > 0) {
           block.output = lines;
           block.truncated = truncated;
+          refreshView();
           refreshStatus();
         }
         break;
@@ -447,6 +414,7 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
         const started = toolStarted.get(event.toolCallId);
         block.ms = typeof event.durationMs === "number" ? event.durationMs : started ? Date.now() - started : undefined;
         currentTool = null;
+        refreshView();
         refreshStatus();
         break;
       }
@@ -607,9 +575,8 @@ export async function runTui(options: TuiOptions): Promise<TranscriptBlock[]> {
         return;
       }
       case "/clear":
-        transcript.blocks.length = 0;
-        transcript.invalidate();
-        tui.requestRender();
+        builder.reset();
+        refreshView();
         return;
       case "/model":
         notice(`${options.provider}/${options.model}  (set with --provider/--model or .harness/config.json)`);

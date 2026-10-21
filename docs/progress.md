@@ -748,3 +748,97 @@ which is why "better skills" had produced no visible change in behaviour.
   global skills leaked into tests that assert an empty context (7 failures).
 - Tests: 157 (5 new in `tests/skills-global.test.ts`, including the
   `before_agent_start` wiring itself).
+
+## M18: the footer can no longer kill the session
+
+Starting a turn against `qwen35` crashed the whole TUI before the first token:
+
+    Error: Rendered line 1 exceeds terminal width (88 > 81).
+        at TuiMainScreen.doRender (pi-tui/dist/tui-main-screen.js:493)
+
+`renderStatus` only dropped *optional* segments (server, stream, context, tokens,
+gpu) when the terminal was narrow. The badge, `tools N`, elapsed and the hint
+were emitted unconditionally, so `◐ working · tools 0 · waiting for first token
+· 0.0s` plus `ctrl+c cancels · ctrl+z quits` came to 88 columns at 81 and pi-tui
+throws on any over-wide line. The idle/"ready" footer was narrow enough, which
+is why it only broke once a turn started.
+
+- Degradation order is now: optional segments (gpu → tokens → context → idle →
+  stream → server), then `tools N`, then the hint, and finally
+  `truncateToWidth` as an absolute guard. The pinned pair (activity + t/s) is
+  the last thing standing, so a narrow terminal keeps the "is it stuck?"
+  answers and drops the counter nobody reads.
+- The hint used to be sacrificed before `tools 0`; now it survives at 81 by
+  dropping the tools counter instead.
+
+**Checks**
+
+- `npm run typecheck`, `npm run build`, `npm test` — all pass, 180 tests.
+- New: exact repro at 81 columns (line is exactly 81, keeps the activity and the
+  hint, drops `tools 0`), plus a sweep 8..200 columns asserting every rendered
+  footer fits.
+- Real pi-tui path, not just the unit: a scratch probe built `TuiMainScreen` on a
+  fake 81-column terminal, re-rendered 6 frames. Old composition throws on
+  frame 1 (`Rendered line 0 exceeds terminal width (88 > 81)`); the fixed one
+  renders all 6 frames clean.
+
+**Next:** confirm in a live `qwen35` session at a narrow terminal; the crash log
+path (`/tmp/pi-tui-crash.log`) should stay unwritten.
+
+## M19: the transcript is append-only — and the build has to be the build we tested
+
+The reported symptom was a message that "hangs on top and keeps updating while
+more messages arrive below it, until it fills the screen — then I have to go
+back to the top to read the start of it". Two separate things were true.
+
+**1. The binary was a stale bundle.** `piharness` runs `dist/cli.js`; `dist/`
+was built 18 Oct 03:22 while `src/ui/blocks.ts` was last edited 12:14, and
+`dist/ui/blocks.js` contained no `TranscriptBuilder` at all. So the running UI
+was still the old model: `turn.assistantIndex` was set once per turn at the
+first token and every later `text_delta` appended to *that same block index*,
+even after tool calls. The answer's block therefore sat anchored above the
+tools, the reasoning and everything else that arrived later, and grew in place
+while they were pushed down — exactly the "message stuck at the top, still
+updating, everything else arriving below" that was described. The fix for it
+(the builder) had already been written and tested; it had never been compiled.
+
+**2. Non-linearity is a renderer invariant, not a formatting preference.** A
+line that changes above the viewport cannot be patched by a diff renderer: it
+throws the cursor, so pi-tui falls back to `fullRender(true)` — `ESC[2J ESC[H
+ESC[3J`, which also wipes the terminal scrollback. That is why history seemed
+to vanish and the view jumped back to the top.
+
+The rule now enforced by `TranscriptBuilder`: a text segment is sealed the
+moment anything else is appended, so prose after a tool call starts a new block
+*below* it; reasoning is emitted as immutable lines (M16); `text()` resumes a
+segment only when nothing was appended since.
+
+**3. Guard against the class of failure.** `src/build-info.ts` plus
+`warnIfStaleBuild()` in the CLI: when `dist/*.js` is more than 2 s older than
+the newest file under `src/`, one line goes to stderr —
+
+    piharness: this build is 8.9h older than src/ (.../src/ui/blocks.ts).
+               You are running old UI — run `npm run build` to rebuild.
+
+Silent for installed packages (no `src/` beside `dist/`) and when running from
+source under `tsx`; `PIHARNESS_NO_STALE_WARNING=1` silences it.
+
+**Checks**
+
+- `npm run typecheck`, `npm run build`, `npm test` — all pass, 191 tests.
+- `dist/ui/blocks.js` now contains `TranscriptBuilder` (`grep -c` 0 → 1).
+- Screen-level replay of the *built* bundle: real `runTui`, fake 100x40
+  terminal with a VT emulator, 3 short turns then a long one (reasoning,
+  answer, `bash` with streaming output, wrap-up): 191 frames, 104 natural
+  scrolls, **0 full clears, 0 scrollback wipes**, and after every frame the
+  bottom two emulated rows matched the bottom two buffer lines — no drift.
+- Same harness with a change above the viewport reproduces the clear path, so
+  the zero above is a measurement, not an absence of events.
+- New tests: `tests/build-info.test.ts` (6) — newest-source detection, stale
+  and fresh bundles, missing `src/`/entry, sub-second tolerance.
+
+**Next:** reasoning volume is now the remaining wall of text — a real `qwen38`
+turn in this repo emitted 7.9k chars of thinking (≈130 lines at 100 columns),
+all of it printed inline. Linear is not the same as readable; capping a thought
+run to head + tail with a `… N lines` counter is the obvious next step, but it
+changes what M16 deliberately made visible, so it is not in this change.

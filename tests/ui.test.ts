@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { interruptIntent, previewFromArgs, summarizeArgs, summarizeResult } from "../src/ui/app.js";
 import {
+  TranscriptBuilder,
   breakLines,
   renderAssistantText,
   renderBanner,
@@ -12,7 +13,6 @@ import {
   renderUser,
   type TranscriptBlock,
 } from "../src/ui/blocks.js";
-import { BLACK_ORANGE } from "../src/ui/theme.js";
 import { BLACK_ORANGE, bg, fg, padTo, setColorEnabled } from "../src/ui/theme.js";
 
 const P = BLACK_ORANGE;
@@ -162,6 +162,55 @@ test("status: left state, right hint, exact width", () => {
   assert.ok(line.includes("/help  /quit"));
 });
 
+test("status: a busy turn at 81 columns stays inside the width", () => {
+  // Regression: pi-tui throws on any line wider than the terminal, which killed
+  // the session the moment a local model sat in prefill with the long help hint.
+  const line = renderStatus(
+    {
+      busy: true,
+      toolCalls: 0,
+      tokens: 0,
+      elapsedMs: 0,
+      hint: "ctrl+c cancels · ctrl+z quits",
+      activity: "waiting for first token",
+      spinner: "◐",
+    },
+    81,
+    P,
+  )[0];
+  assert.equal(visibleWidth(line), 81);
+  assert.ok(line.includes("waiting for first token"));
+  // The hint survives; the useless `tools 0` counter is what gets dropped.
+  assert.ok(line.includes("ctrl+c cancels"));
+  assert.ok(!line.includes("tools 0"));
+});
+
+test("status: never wider than the terminal, at any width", () => {
+  const info = {
+    busy: true,
+    toolCalls: 12,
+    tokens: 184_000,
+    elapsedMs: 91_500,
+    hint: "ctrl+c cancels · ctrl+z quits",
+    rate: "18.4 t/s",
+    context: "ctx 184k/262k 70%",
+    gpu: "gpu 97% 22.1/24.0G",
+    server: "prefill 12k/96k",
+    stream: "+412 tok",
+    idle: "stalled 31s",
+    activity: "⚙ run_a_tool_with_a_very_long_name",
+    spinner: "◑",
+  };
+  for (let width = 8; width <= 200; width++) {
+    const lines = renderStatus(info, width, P);
+    assert.equal(lines.length, 1);
+    assert.ok(
+      visibleWidth(lines[0]) <= width,
+      `width ${width} overflowed to ${visibleWidth(lines[0])}`,
+    );
+  }
+});
+
 test("breakLines: streamed prose becomes lines without waiting for a newline", () => {
   // A reasoning model emits one long paragraph; every complete line must be
   // printable immediately or the thought stays invisible until the turn ends.
@@ -211,4 +260,76 @@ test("interruptIntent: ordinary keys are left to the editor", () => {
   for (const key of ["a", " ", "\r", "\x1b[A", "/quit"]) {
     assert.equal(interruptIntent(key), null);
   }
+});
+
+test("builder: a turn reads top to bottom, and the answer lands last", () => {
+  const b = new TranscriptBuilder();
+  b.beginTurn();
+  b.thinking("I should look at the file first.", 60);
+  b.text("Looking.");
+  b.append({ kind: "tool", name: "read", detail: "src/a.ts", status: "ok", output: [], truncated: false });
+  b.thinking("It is a small file.", 60);
+  b.text("Done — the file is fine.");
+  b.end();
+
+  const kinds = b.blocks.map((x) => x.kind);
+  const firstText = kinds.indexOf("assistant");
+  const tool = kinds.indexOf("tool");
+  const lastText = kinds.lastIndexOf("assistant");
+  assert.ok(kinds.indexOf("thinkingLine") < firstText, kinds.join(","));
+  assert.ok(firstText < tool && tool < lastText, kinds.join(","));
+  const answer = b.blocks[lastText];
+  assert.equal(answer.kind, "assistant");
+  assert.equal(answer.kind === "assistant" && answer.text, "Done — the file is fine.");
+  // Reasoning produced after the tool call is printed after it, not hoisted.
+  const afterTool = kinds.slice(tool).indexOf("thinkingLine");
+  assert.ok(afterTool > 0 && tool + afterTool < lastText, kinds.join(","));
+});
+
+test("builder: consecutive deltas stay one block, and end() seals it", () => {
+  const b = new TranscriptBuilder();
+  b.beginTurn();
+  b.text("Hel");
+  b.text("lo");
+  assert.equal(b.blocks.length, 1);
+  const block = b.blocks[0];
+  assert.equal(block.kind === "assistant" && block.text, "Hello");
+  assert.equal(block.kind === "assistant" && block.streaming, true);
+  b.end();
+  assert.equal(block.kind === "assistant" && block.streaming, false);
+});
+
+test("builder: a thought is never printed under the answer it produced", () => {
+  const b = new TranscriptBuilder();
+  b.beginTurn();
+  b.thinking("partial thought without a line break", 80);
+  b.text("answer");
+  const kinds = b.blocks.map((x) => x.kind);
+  assert.equal(kinds[kinds.length - 1], "assistant", kinds.join(","));
+  const thought = b.blocks[kinds.indexOf("thinkingLine")];
+  assert.equal(thought.kind === "thinkingLine" && thought.text, "partial thought without a line break");
+});
+
+test("builder: reset() clears history without leaving a half-open segment", () => {
+  const b = new TranscriptBuilder();
+  b.beginTurn();
+  b.text("old");
+  b.reset();
+  assert.equal(b.blocks.length, 0);
+  b.text("new");
+  assert.equal(b.blocks.length, 1);
+  assert.equal(b.blocks[0].kind === "assistant" && b.blocks[0].text, "new");
+});
+
+test("builder: rendered order matches append order", () => {
+  const b = new TranscriptBuilder();
+  b.beginTurn();
+  b.thinking("first", 40);
+  b.text("middle");
+  b.append({ kind: "notice", level: "info", text: "last" });
+  b.end();
+  const plain = renderTranscript(b.blocks, 40, BLACK_ORANGE).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  const at = (needle: string) => plain.findIndex((l) => l.includes(needle));
+  assert.ok(at("first") >= 0 && at("first") < at("middle"), plain.join("|"));
+  assert.ok(at("middle") < at("last"), plain.join("|"));
 });

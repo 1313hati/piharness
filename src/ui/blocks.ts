@@ -127,6 +127,99 @@ export function wrap(text: string, width: number): string[] {
   return out;
 }
 
+/**
+ * Append-order owner for the transcript.
+ *
+ * The rule that matters: a text segment begins where nothing else was appended
+ * since the previous one. Keeping a single growing assistant block for a whole
+ * turn anchored every later sentence — including the final answer — above the
+ * tool calls that had already scrolled past, which is what made a linear
+ * session read as scrambled. Reasoning is sealed by whatever comes next, so a
+ * thought is never printed after the answer it produced.
+ */
+export class TranscriptBuilder {
+  readonly blocks: TranscriptBlock[] = [];
+  /** Open assistant segment; null once any other block is appended. */
+  private assistant: AssistantBlock | null = null;
+  /** Reasoning that has not become a printed line yet. */
+  private thinkingBuf = "";
+  private thinkingOpen = false;
+  /** Width of the last reasoning delta; wrapping can never be redone later. */
+  private width = 100;
+
+  /** Start a turn: segment state only — history stays. */
+  beginTurn(): void {
+    this.assistant = null;
+    this.thinkingBuf = "";
+    this.thinkingOpen = false;
+  }
+
+  /** Reasoning delta: printed as immutable lines, in transcript order. */
+  thinking(delta: string, width: number): void {
+    this.width = Math.max(20, width);
+    if (!this.thinkingOpen) {
+      this.thinkingOpen = true;
+      this.blocks.push({ kind: "thinkingHead" });
+    }
+    this.sealAssistant();
+    this.thinkingBuf += delta;
+    this.flushThinking(false);
+  }
+
+  /** Print every complete reasoning line; `all` also prints the tail. */
+  flushThinking(all: boolean): void {
+    const { lines, rest } = breakLines(this.thinkingBuf, this.width);
+    for (const line of lines) this.blocks.push({ kind: "thinkingLine", text: line });
+    this.thinkingBuf = rest;
+    if (all && rest.trim()) {
+      for (const line of wrap(rest, this.width)) this.blocks.push({ kind: "thinkingLine", text: line });
+      this.thinkingBuf = "";
+    }
+  }
+
+  /** Prose delta. Resumes a segment only if nothing was appended since. */
+  text(delta: string): void {
+    if (!this.assistant) {
+      this.flushThinking(true);
+      this.thinkingOpen = false;
+      this.assistant = { kind: "assistant", text: "", streaming: true };
+      this.blocks.push(this.assistant);
+    }
+    this.assistant.text += delta;
+  }
+
+  /** A tool, notice or user block: closes the open segment, then lands. */
+  append(block: TranscriptBlock): void {
+    this.flushThinking(true);
+    this.thinkingOpen = false;
+    this.sealAssistant();
+    this.blocks.push(block);
+  }
+
+  /** Turn over: nothing is still streaming, no reasoning is left unprinted. */
+  end(): void {
+    this.sealThinking();
+    this.sealAssistant();
+  }
+
+  /** Keep the history but drop any half-open segment (used by /clear). */
+  reset(): void {
+    this.beginTurn();
+    this.blocks.length = 0;
+  }
+
+  private sealThinking(): void {
+    this.flushThinking(true);
+    this.thinkingOpen = false;
+  }
+
+  private sealAssistant(): void {
+    if (!this.assistant) return;
+    this.assistant.streaming = false;
+    this.assistant = null;
+  }
+}
+
 function firstLine(text: string, width: number): string {
   const one = text.replace(/\s+/g, " ").trim();
   return truncateToWidth(one, width, "…");
@@ -376,20 +469,42 @@ export function renderStatus(info: StatusInfo, width: number, p: Palette): strin
   const optional = [info.server, info.stream, info.idle, info.context, `tokens ${info.tokens}`, info.gpu].filter(
     (s): s is string => typeof s === "string" && s.length > 0,
   );
-  const base = [`${dot} ${info.busy ? "working" : "ready"}`, `tools ${info.toolCalls}`,
-    `${(info.elapsedMs / 1000).toFixed(1)}s`];
-
-  const build = (segments: string[], extra: string[]) =>
-    [base[0], base[1], ...pinnedSegs, ...extra, ...segments, base[2]].join(sep);
   // The idle/stall warning is the last thing to go before the pinned pair.
   const warn = info.idle && /^stalled/.test(info.idle) ? info.idle : undefined;
-  const rest = optional.filter((s) => s !== warn);
-  let shown = [...rest];
-  let left = build(shown, warn ? [warn] : []);
-  while (visibleWidth(left) + visibleWidth(hint) + 3 > width && shown.length > 0) {
-    shown = shown.slice(0, -1);
-    left = build(shown, warn ? [warn] : []);
+
+  let shown = optional.filter((s) => s !== warn);
+  // `tools 0` is the least informative number on the footer and dropping it is
+  // cheaper than dropping the key hint, so it goes before the hint does.
+  let withTools = true;
+  let showHint = true;
+
+  const build = () =>
+    [
+      `${dot} ${info.busy ? "working" : "ready"}`,
+      ...(withTools ? [`tools ${info.toolCalls}`] : []),
+      ...pinnedSegs,
+      ...(warn ? [warn] : []),
+      ...shown,
+      `${(info.elapsedMs / 1000).toFixed(1)}s`,
+    ].join(sep);
+  const needed = (line: string) =>
+    visibleWidth(line) + (showHint ? visibleWidth(hint) + 3 : 0);
+
+  let left = build();
+  // Every droppable thing goes before the line is allowed to overflow: a
+  // single column too many makes pi-tui throw and takes the session with it.
+  while (needed(left) > width && (shown.length > 0 || withTools || showHint)) {
+    if (shown.length > 0) shown = shown.slice(0, -1);
+    else if (withTools) withTools = false;
+    else showHint = false;
+    left = build();
+  }
+
+  if (!showHint) {
+    return [padTo(truncateToWidth(fg(p.text, left), width, "…"), width, p.surface)];
   }
   const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(hint) - 2);
-  return [padTo(`${fg(p.text, left)}${" ".repeat(gap)}${hint}`, width, p.surface)];
+  const line = `${fg(p.text, left)}${" ".repeat(gap)}${hint}`;
+  // Last-resort guard for absurdly narrow terminals and over-long tool names.
+  return [padTo(truncateToWidth(line, width, "…"), width, p.surface)];
 }

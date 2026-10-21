@@ -1,8 +1,20 @@
 diff --git i/Model.js w/Model.js
-index 9fc0bcc..650ac32 100644
+index 9fc0bcc..27a62aa 100644
 --- i/Model.js
 +++ w/Model.js
-@@ -582,7 +582,7 @@ function weights(rows, list) {
+@@ -140,7 +140,10 @@ function homeView(s, ui) {
+   }
+   if (!(s.kinds || []).length && !(s.deployments || []).length) return soonView(s, ui)
+   if (ui.view === "models") return { title: "LOCAL AI", version: s.version, rows: [tabs(ui)].concat(modelsTab(s, ui)) }
+-  var rows = [tabs(ui), activity(s, ui)]
++  var rows = [tabs(ui)]
++  // a live view of the cards, as nvtop draws them, right under the tabs when NVIDIA cards are there to read
++  if ((s.gpus || []).some(function(g) { return g.backend === "nvidia" })) rows.push({ type: "nvtop" })
++  rows.push(activity(s, ui))
+   ;(s.deployments || []).filter(function(d) { return d.state === "ready" })
+     .concat((s.deployments || []).filter(function(d) { return working(d) })).forEach(function(d) { rows.push(card(s, d)) })
+   // a model that stopped, to run again or dismiss
+@@ -582,7 +585,7 @@ function weights(rows, list) {
  // Agent identity and actions keep the same rows and buttons as the rest of the panel.
  function agentName(a) {
    return ({ pi: "pi", claude: "Claude Code", codex: "Codex", opencode: "OpenCode", omp: "oh-my-pi",
@@ -11,50 +23,59 @@ index 9fc0bcc..650ac32 100644
  }
  // The agent: closed, one row with the one chosen; opened, every agent once, the chosen one marked (a check, an ink
  // bar), each of the others choosing itself. Then default and update for the chosen one, and the folder.
-@@ -659,6 +659,30 @@ function settingsView(s, ui) {
+@@ -659,6 +662,36 @@ function settingsView(s, ui) {
  function build(s, ui) {
    s = s || {}
    var v = (ui.view === "settings" ? settingsView(s, ui) : ui.view === "folder" ? folderView(s, ui) : ui.view === "agents" ? agentsView(s, ui) : ui.view === "run" ? runView(s, ui.id, ui) : ui.view === "kind" ? kindView(s, ui.id, ui) : ui.view === "gpus" ? gpusView(s, ui) : ui.view === "group" ? groupView(s, ui.id, Number(ui.key), ui) : null) || homeView(s, ui)
-+  if (s.coder && (!ui.view || ui.view === "home")) {
-+    var c = s.coder
-+    // Token counters come from llama-server's own /slots: the panel's usual token line reads the gateway log,
-+    // which never sees a model coder.sh started.
++  // The two coder servers share one port, so each gets its own Start/Stop row and
++  // only one runs at a time: the wrapper stops the other when a Start asks for it.
++  // Token counters come from llama-server's own /slots: the panel's usual token line
++  // reads the gateway log, which never sees a model a coder script started.
++  function coderSection(c, key) {
 +    var head = [
-+      { type: "sec", label: "CODER.SH · QWEN3.8 27B" },
++      { type: "sec", label: c.label || key.toUpperCase() },
 +      { type: "field", icon: "machine", label: "server", value: c.state },
-+      { type: "field", icon: "context", label: "context", value: String(c.context) + " · UD-Q4_K_XL · MTP" }
++      { type: "field", icon: "context", label: "context",
++        value: String(c.context) + (c.model ? " · " + c.model : "") + (c.note ? " · " + c.note : "") }
 +    ]
 +    if (c.tokens) head.push({ type: "field", icon: "tokens", label: "tokens", value: c.tokens })
 +    if (c.speed) head.push({ type: "field", icon: "speed", label: "speed",
 +      value: c.speed + (c.contextUsed ? " · " + c.contextUsed + " ctx" : "") + (c.requests ? " · " + c.requests + " req" : "") })
-+    v.rows = head.concat([
++    return head.concat([
 +      { type: "acts", items: [
-+        { label: "Start", action: c.pid ? "" : "coder|start" },
-+        { label: "Stop", action: c.pid ? "coder|stop" : "", danger: true },
-+        { label: "Claude", action: "coder|claude" },
-+        { label: "Pi", action: "coder|pi" },
-+        { label: "piharness", action: "coder|piharness" },
-+        { label: "Hermes", action: "coder|hermes" },
-+        { label: "Logs", action: "coder|logs" }
++        { label: "Start", action: c.pid ? "" : key + "|start" },
++        { label: "Stop", action: c.pid ? key + "|stop" : "", danger: true },
++        { label: "Claude", action: key + "|claude" },
++        { label: "Pi", action: key + "|pi" },
++        { label: "piharness", action: key + "|piharness" },
++        { label: "Hermes", action: key + "|hermes" },
++        { label: "Logs", action: key + "|logs" }
 +      ] }
-+    ]).concat(v.rows)
++    ])
++  }
++  if (!ui.view || ui.view === "home") {
++    if (s.codernew) v.rows = coderSection(s.codernew, "codernew").concat(v.rows)
++    if (s.coder) v.rows = coderSection(s.coder, "coder").concat(v.rows)
 +  }
    // usage reporting is off until you choose: home asks once, and either answer is kept and ends the question; No thanks
    // comes first, so the first keyboard focus never turns it on
    if (s.reporting === "unset" && (!ui.view || ui.view === "home"))
-@@ -670,7 +694,9 @@ function build(s, ui) {
+@@ -670,7 +703,12 @@ function build(s, ui) {
        items: [{ label: ui.updatingAgent === "plugin" ? "Updating…" : "Update Local AI", action: ui.updatingAgent ? "" : "update|plugin" }] })
    if (ui.problem || ui.pollProblem || s.setupError) v.rows.unshift({ type: "error", label: ui.problem || ui.pollProblem || s.setupError })
    else if (ui.notice) v.rows.unshift({ type: "banner", text: ui.notice })
 -  return Object.assign(v, { mark: ui.problem || ui.pollProblem || s.setupError ? "failed" : mark(s) })
-+  // the bar's tooltip reads this: the coder server's speed without opening the panel
-+  v.coder = s.coder ? { speed: s.coder.speed, contextUsed: s.coder.contextUsed || "", tokens: s.coder.tokens || "" } : null
-+  return Object.assign(v, { mark: ui.problem || ui.pollProblem || s.setupError ? "failed" : mark(s) || (s.coder && s.coder.state === "ready" ? "ready" : s.coder && s.coder.pid ? "busy" : "") })
++  // the bar's tooltip reads this: the running coder server's speed without opening the panel
++  var live = [s.codernew, s.coder].filter(function(c) { return c && c.state === "ready" })[0] || null
++  v.coder = live ? { speed: live.speed, contextUsed: live.contextUsed || "", tokens: live.tokens || "",
++    label: live.short || "qwen3.8 27B" } : null
++  var anyPid = [s.codernew, s.coder].some(function(c) { return c && c.pid })
++  return Object.assign(v, { mark: ui.problem || ui.pollProblem || s.setupError ? "failed" : mark(s) || (live ? "ready" : anyPid ? "busy" : "") })
  }
  
  if (typeof module !== "undefined") module.exports = { build: build, parse: parse, tones: tones, catalog: catalog, cardText: cardText }
 diff --git i/Panel.qml w/Panel.qml
-index 7b6208d..47424f5 100644
+index 7b6208d..0eb9a00 100644
 --- i/Panel.qml
 +++ w/Panel.qml
 @@ -17,7 +17,7 @@ Panel {
@@ -66,33 +87,230 @@ index 7b6208d..47424f5 100644
    readonly property color theme: bar ? bar.foreground : Color.foreground
    // the dots sit on the bar, which may be transparent: they take the bar's own foreground, as Omarchy's buttons do
    readonly property color dotTone: bar && bar.barForeground !== undefined ? bar.barForeground : theme
-@@ -205,6 +205,7 @@ Panel {
+@@ -194,6 +194,8 @@ Panel {
+     // the tabs sit a group apart from what is above and below them
+     if (t === "tabs") return i === 0 ? topGap : groupGap
+     if (i > 0 && rows[i - 1].type === "tabs") return topGap
++    // the cards' live view is a surface: air above and below it
++    if (t === "nvtop" || (i > 0 && rows[i - 1].type === "nvtop")) return topGap
+     if (i === 0 && !view.hero && t !== "sec") return topGap
+     if (t === "sec" || t === "acts" || t === "error" || t === "search" || t === "banner" || t === "thead" && rows[i].pair) return groupGap
+     if (t === "run" || t === "grid") return i === 0 && !view.hero ? topGap : blockGap
+@@ -205,6 +207,8 @@ Panel {
      ui = Object.assign({}, ui, { notice: "", problem: "" })
      var a = (action || "").split("|")
      switch (a[0]) {
++    case "codernew": run(["codernew-" + a[1]]); break
 +    case "coder": run(["coder-" + a[1]]); break
      case "forget": run(["forget", a[1]]); nav({ open: "" }); break
      // a folder a recipe no longer offered left behind (the snapshot's unoffered)
      case "discard": run(["forget", "--folder", a[1]]); break
-@@ -332,7 +333,9 @@ Panel {
+@@ -332,7 +336,9 @@ Panel {
      objectName: "local-ai-mark"
      anchors.fill: parent
      bar: root.bar
 -    tooltipText: "Local AI"
 +    tooltipText: root.view.coder && root.view.coder.speed
-+      ? "Local AI · qwen3.8 27B · " + root.view.coder.speed + (root.view.coder.contextUsed ? " · " + root.view.coder.contextUsed : "")
++      ? "Local AI · " + (root.view.coder.label || "qwen3.8 27B") + " · " + root.view.coder.speed + (root.view.coder.contextUsed ? " · " + root.view.coder.contextUsed : "")
 +      : "Local AI"
      onPressed: root.toggle()
      iconComponent: Component {
        Item {
+@@ -538,7 +544,7 @@ Panel {
+             x: inset
+             y: parent.gap
+             width: parent.width - 2 * inset
+-            sourceComponent: ({ life: lifeC, run: runC, slot: slotC, links: linksC, grid: gridC, gpu: gpuC,
++            sourceComponent: ({ life: lifeC, run: runC, slot: slotC, links: linksC, grid: gridC, gpu: gpuC, nvtop: nvtopC,
+               field: fieldC, agent: agentC, acts: linksC, search: searchC, thead: tableC, trow: tableC, tabs: tabsC, banner: bannerC, card: cardC })[r.type] || textC
+           }
+ 
+@@ -844,6 +850,171 @@ Panel {
+             }
+           }
+ 
++          // The cards as nvtop draws them: util and vram over the last minute, the numbers beside them.
++          // nvidia-smi is asked once a second while the panel is up, and not at all once it is closed.
++          Component {
++            id: nvtopC
++            Rectangle {
++              id: nv
++              objectName: "local-ai-nvtop"
++              property int samples: 60
++              // what each card is, what it is doing now, and the minute of util and vram behind it
++              property var cards: []
++              property var live: []
++              property var utils: []
++              property var mems: []
++              property bool broken: false
++              readonly property int headH: Style.space(20)
++              readonly property int cellH: Style.space(54)
++              // a ruled surface on the page, one cell per card; a card that cannot be read takes one line, not a cell
++              height: headH + (cards.length ? cards.length * cellH : Style.space(20)) + Style.space(8)
++              implicitHeight: height
++              color: root.surface
++              clip: true
++              Rectangle { width: parent.width; height: 1; color: root.ruleTone }
++              Rectangle { y: parent.height - 1; width: parent.width; height: 1; color: root.ruleTone }
++              Label { x: root.gutter; y: Style.space(4); text: "GPU"; color: root.labelTone; font.pixelSize: Style.font.caption }
++              // the two traces, named in their own tone
++              Row {
++                anchors.right: parent.right
++                anchors.rightMargin: root.gutter
++                y: Style.space(4)
++                spacing: Style.space(10)
++                visible: nv.cards.length > 0
++                Label { text: "util"; color: root.ink; font.pixelSize: Style.font.caption }
++                Label { text: "vram"; color: root.labelTone; font.pixelSize: Style.font.caption }
++              }
++              Repeater {
++                model: Math.max(1, nv.cards.length)
++                Item {
++                  required property int index
++                  y: nv.headH + index * nv.cellH
++                  width: nv.width
++                  height: nv.cellH
++                  readonly property var card: nv.cards[index] || ({})
++                  readonly property var now: nv.live[index] || ({})
++                  Label {
++                    id: cardName
++                    x: root.gutter
++                    y: Style.space(1)
++                    width: Math.max(0, parent.width - 2 * root.gutter - cardNums.width - Style.space(12))
++                    elide: Text.ElideRight
++                    font.pixelSize: Style.font.caption
++                    color: root.valueTone
++                    text: card.name ? card.index + "  " + card.name : (nv.broken ? "nvidia-smi did not answer" : "reading the cards…")
++                  }
++                  Row {
++                    id: cardNums
++                    anchors.right: parent.right
++                    anchors.rightMargin: root.gutter
++                    anchors.verticalCenter: cardName.verticalCenter
++                    spacing: Style.space(9)
++                    Label { font.pixelSize: Style.font.caption; color: root.ink; text: nv.pct(now.util) }
++                    Label { font.pixelSize: Style.font.caption; color: root.labelTone; text: nv.memText(now) }
++                    Label { font.pixelSize: Style.font.caption; color: root.labelTone; text: nv.tempText(now); visible: text !== "" }
++                    Label { font.pixelSize: Style.font.caption; color: root.labelTone; text: nv.wattText(now); visible: text !== "" }
++                  }
++                  // util under a filled area, vram over it as a hairline; a fixed sixty slots, so the trace walks right
++                  Canvas {
++                    id: spark
++                    x: root.gutter
++                    y: Style.space(17)
++                    width: Math.max(0, parent.width - 2 * root.gutter)
++                    height: Style.space(31)
++                    property var utils: nv.utils[index] || []
++                    property var mems: nv.mems[index] || []
++                    onUtilsChanged: requestPaint()
++                    onMemsChanged: requestPaint()
++                    Component.onCompleted: requestPaint()
++                    onPaint: {
++                      var g = getContext("2d"), w = width, h = height
++                      g.clearRect(0, 0, w, h)
++                      // the floor stays: an idle card still reads as a chart
++                      g.strokeStyle = Qt.rgba(root.ruleTone.r, root.ruleTone.g, root.ruleTone.b, 0.9)
++                      g.lineWidth = 1
++                      g.beginPath()
++                      g.moveTo(0, h - 1.5)
++                      g.lineTo(w, h - 1.5)
++                      g.stroke()
++                      var u = utils || [], m = mems || []
++                      if (Math.max(u.length, m.length) < 2) return
++                      var xs = function(i) { return i / (nv.samples - 1) * w }
++                      var ys = function(v) { return h - 2 - Math.max(0, Math.min(100, v)) / 100 * (h - 4) }
++                      var i, from = nv.samples - u.length
++                      if (u.length) {
++                        g.beginPath()
++                        for (i = 0; i < u.length; i++) { if (i) g.lineTo(xs(from + i), ys(u[i])); else g.moveTo(xs(from + i), ys(u[i])) }
++                        g.lineTo(xs(from + u.length - 1), h - 1.5)
++                        g.lineTo(xs(from), h - 1.5)
++                        g.closePath()
++                        g.fillStyle = Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.10)
++                        g.fill()
++                        g.beginPath()
++                        for (i = 0; i < u.length; i++) { if (i) g.lineTo(xs(from + i), ys(u[i])); else g.moveTo(xs(from + i), ys(u[i])) }
++                        g.strokeStyle = Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.55)
++                        g.lineWidth = 1.2
++                        g.stroke()
++                      }
++                      if (m.length) {
++                        from = nv.samples - m.length
++                        g.beginPath()
++                        for (i = 0; i < m.length; i++) { if (i) g.lineTo(xs(from + i), ys(m[i])); else g.moveTo(xs(from + i), ys(m[i])) }
++                        g.strokeStyle = Qt.rgba(root.labelTone.r, root.labelTone.g, root.labelTone.b, 0.75)
++                        g.lineWidth = 1
++                        g.stroke()
++                      }
++                    }
++                  }
++                }
++              }
++              Process {
++                id: nvProbe
++                command: ["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw", "--format=csv,noheader,nounits"]
++                stdout: StdioCollector { id: nvOut; waitForEnd: true }
++                onExited: function(code) { nv.read(code, nvOut.text) }
++              }
++              Timer {
++                interval: 1000
++                repeat: true
++                triggeredOnStart: true
++                running: root.opened || root.full
++                onTriggered: if (!nvProbe.running) nvProbe.running = true
++              }
++              function num(v) { var n = parseFloat(v); return isFinite(n) ? n : -1 }
++              function pct(v) { return v >= 0 ? Math.round(v) + "%" : "--" }
++              function memText(n) { return n.total > 0 && n.used >= 0 ? (n.used / 1024).toFixed(1) + "/" + Math.round(n.total / 1024) + "G" : "--" }
++              function tempText(n) { return n.temp > 0 ? Math.round(n.temp) + "°" : "" }
++              function wattText(n) { return n.power >= 0 ? Math.round(n.power) + "W" : "" }
++              // one more slot on a trace, the oldest dropped once the minute is full
++              function trace(a, v) {
++                var t = (a || []).slice(-(nv.samples - 1))
++                t.push(v >= 0 ? v : 0)
++                return t
++              }
++              function read(code, text) {
++                if (code !== 0) { nv.broken = true; nv.cards = []; nv.live = []; return }
++                nv.broken = false
++                var lines = String(text || "").split("\n"), cards = [], live = [], utils = [], mems = []
++                for (var i = 0; i < lines.length; i++) {
++                  var line = lines[i].trim()
++                  if (!line) continue
++                  // index, name, then util, used, total, temp and power: the name may hold a comma, so count back
++                  var p = line.split(",").map(function(x) { return x.trim() }), k = p.length
++                  if (k < 6) continue
++                  var u = nv.num(p[k - 5]), used = nv.num(p[k - 4]), total = nv.num(p[k - 3])
++                  cards.push({ index: p[0], name: p.slice(1, k - 5).join(", ") })
++                  live.push({ util: u, used: used, total: total, temp: nv.num(p[k - 2]), power: nv.num(p[k - 1]) })
++                  utils.push(nv.trace(nv.utils[i], u))
++                  mems.push(nv.trace(nv.mems[i], total > 0 && used >= 0 ? used / total * 100 : -1))
++                }
++                nv.cards = cards
++                nv.live = live
++                nv.utils = utils
++                nv.mems = mems
++              }
++            }
++          }
++
+           // A label on the left, a value on the right; a secret value stays hidden, small, until clicked, beside an always-on copy
+           Component {
+             id: fieldC
 diff --git i/bin/omarchy-local-ai-coder w/bin/omarchy-local-ai-coder
 new file mode 100755
-index 0000000..ad667a9
+index 0000000..fd7aad9
 --- /dev/null
 +++ w/bin/omarchy-local-ai-coder
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,391 @@
 +#!/usr/bin/env python3
-+"""Local integration: share coder.sh's native server with the Local AI panel."""
++"""Local integration: share the coder servers' native llama-server with the Local AI panel.
++
++Two profiles, one port: coder.sh (Qwen3.8 27B, alias qwen38) and codernew.sh
++(MiniCPM-V 4.7 35B-A3B, alias minicpm47). Each keeps its own state
++directory and its own Start/Stop row in the panel; only one runs at a time,
++because the wrapper stops the other before a Start.
++"""
 +import contextlib
 +import fcntl
 +import json
@@ -106,9 +324,34 @@ index 0000000..ad667a9
 +
 +HOME = Path.home()
 +BACKEND = Path(__file__).resolve().with_name('omarchy-local-ai')
-+CODER = HOME / 'coder.sh'
-+STATE = HOME / '.local/state/coder'
 +KEYS = {'nvidia:0', 'nvidia:1'}
++ACTIONS = ('start', 'stop', 'pi', 'claude', 'hermes', 'piharness', 'logs')
++PROFILES = {
++    'codernew': {
++        'label': 'CODERNEW \u00b7 MINICPM-V 4.7 35B-A3B',
++        'short': 'minicpm-v 4.7 35B-A3B',
++        'script': HOME / 'codernew.sh',
++        'state': HOME / '.local/state/codernew',
++        'alias': 'minicpm47',
++        'port': 8080,
++        'context': 98304,
++        'model': 'Q4_K_M',
++        'note': '96k ctx',
++    },
++    'coder': {
++        'label': 'CODER.SH \u00b7 QWEN3.8 27B',
++        'short': 'qwen3.8 27B',
++        'script': HOME / 'coder.sh',
++        'state': HOME / '.local/state/coder',
++        'alias': 'qwen38',
++        'port': 8080,
++        'context': 65536,
++        'model': 'UD-Q4_K_XL',
++        'note': 'MTP',
++    },
++}
++# The profile a command is acting on; set in main() before anything reads state.
++ACTIVE = PROFILES['coder']
 +
 +
 +def fail(message):
@@ -147,7 +390,7 @@ index 0000000..ad667a9
 +
 +    now = time.time()
 +    prev, requests = {}, 0
-+    path = STATE / 'live.json'
++    path = ACTIVE['state'] / 'live.json'
 +    try:
 +        prev = json.loads(path.read_text())
 +        requests = int(prev.get('requests') or 0)
@@ -178,7 +421,7 @@ index 0000000..ad667a9
 +    account(prompt, out, task, prev)
 +
 +    try:
-+        STATE.mkdir(parents=True, exist_ok=True)
++        ACTIVE['state'].mkdir(parents=True, exist_ok=True)
 +        path.write_text(json.dumps({'task': task, 'decoded': out, 'ts': now, 'requests': requests,
 +                                    'speed': speed, 'lastSpeed': last, 'taskStart': started}))
 +    except OSError:
@@ -201,12 +444,13 @@ index 0000000..ad667a9
 +
 +
 +
-+USAGE = STATE / 'usage.json'
++def _usage_path():
++    return ACTIVE['state'] / 'usage.json'
 +
 +
 +def _load_usage():
 +    try:
-+        data = json.loads(USAGE.read_text())
++        data = json.loads(_usage_path().read_text())
 +        if isinstance(data.get('days'), dict):
 +            return data
 +    except (OSError, ValueError):
@@ -246,15 +490,18 @@ index 0000000..ad667a9
 +            for k in list(seen)[:-200]:
 +                del seen[k]
 +        try:
-+            STATE.mkdir(parents=True, exist_ok=True)
-+            USAGE.write_text(json.dumps(data))
++            ACTIVE['state'].mkdir(parents=True, exist_ok=True)
++            _usage_path().write_text(json.dumps(data))
 +        except OSError:
 +            pass
 +
 +
-+def merge_usage(s):
++def merge_usage(s, prof=None):
 +    """Fold the ledger into the snapshot's lifetime, so the calendar grid counts
 +    the local server as well as the gateway."""
++    global ACTIVE
++    if prof is not None:
++        ACTIVE = prof
 +    data = _load_usage()
 +    days_by_date = data.get('days') or {}
 +    if not days_by_date:
@@ -297,28 +544,34 @@ index 0000000..ad667a9
 +    return s
 +
 +
-+def native_state():
++def native_state(prof):
++    global ACTIVE
++    ACTIVE = prof
 +    pid = None
++    want = prof['alias'].encode()
++    port = str(prof['port']).encode()
 +    for p in Path('/proc').glob('[0-9]*'):
 +        try:
 +            if p.stat().st_uid != os.getuid() or (p / 'exe').resolve().name != 'llama-server':
 +                continue
 +            args = (p / 'cmdline').read_bytes().split(b'\0')
-+            if b'qwen38' in args and b'8080' in args:
++            if want in args and port in args:
 +                pid = int(p.name)
 +                break
 +        except (OSError, RuntimeError):
 +            pass
-+    result = {'state': 'loading' if pid else 'stopped', 'pid': pid, 'context': 65536}
++    result = {'state': 'loading' if pid else 'stopped', 'pid': pid, 'context': prof['context'],
++              'alias': prof['alias'], 'label': prof['label'], 'short': prof.get('short', ''),
++              'model': prof['model'], 'note': prof['note']}
 +    if pid:
 +        try:
 +            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-+            with opener.open('http://127.0.0.1:8080/health', timeout=1) as r:
++            with opener.open(f"http://127.0.0.1:{prof['port']}/health", timeout=1) as r:
 +                ready = json.load(r).get('status') == 'ok'
 +            if ready:
 +                result['state'] = 'ready'
 +                try:
-+                    with opener.open('http://127.0.0.1:8080/slots', timeout=1) as r:
++                    with opener.open(f"http://127.0.0.1:{prof['port']}/slots", timeout=1) as r:
 +                        slots = json.load(r)
 +                    if isinstance(slots, list) and slots:
 +                        slot = max(slots, key=lambda x: (x.get('id_task') or 0))
@@ -337,8 +590,8 @@ index 0000000..ad667a9
 +
 +@contextlib.contextmanager
 +def start_lock():
-+    STATE.mkdir(parents=True, exist_ok=True)
-+    with (STATE / 'plugin-start.lock').open('a') as lock:
++    ACTIVE['state'].mkdir(parents=True, exist_ok=True)
++    with (ACTIVE['state'] / 'plugin-start.lock').open('a') as lock:
 +        try:
 +            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 +        except BlockingIOError:
@@ -353,8 +606,23 @@ index 0000000..ad667a9
 +            fail('Stop ' + d.get('name', 'the Docker model') + ' in Local AI before starting coder.sh.')
 +
 +
-+def terminal(action):
-+    # Run in Local AI's chosen folder; each agent uses coder.sh's own configuration.
++def running_other(prof):
++    """The other profile's server, if it is up: both listen on the same port."""
++    global ACTIVE
++    for other in PROFILES.values():
++        if other is prof:
++            continue
++        if native_state(other)['pid']:
++            ACTIVE = prof
++            return other
++    ACTIVE = prof
++    return None
++
++
++def terminal(prof, action):
++    global ACTIVE
++    ACTIVE = prof
++    # Run in Local AI's chosen folder; each agent uses its coder script's own configuration.
 +    settings = HOME / '.local/state/omarchy/local-ai/settings.json'
 +    try:
 +        folder = Path(json.loads(settings.read_text()).get('folder', str(HOME))).expanduser()
@@ -365,39 +633,49 @@ index 0000000..ad667a9
 +    if action in ('start', 'pi', 'claude', 'hermes', 'piharness'):
 +        with start_lock():
 +            ensure_cards_free()
-+            rc = subprocess.call(['bash', str(CODER), '--start'], env=env)
++            other = running_other(prof)
++            if other:
++                print(f"{other['label'].split(' \u00b7 ')[0]} is running on port "
++                      f"{other['port']}; stopping it for {prof['label'].split(' \u00b7 ')[0]}.", flush=True)
++                subprocess.call(['bash', str(other['script']), '--stop'], env=env)
++            rc = subprocess.call(['bash', str(prof['script']), '--start'], env=env)
 +        if rc:
 +            return rc
 +        if action != 'start':
-+            return subprocess.call(['bash', str(CODER), action], env=env)
++            return subprocess.call(['bash', str(prof['script']), action], env=env)
 +        return 0
-+    return subprocess.call(['bash', str(CODER), '--' + action], env=env)
++    return subprocess.call(['bash', str(prof['script']), '--' + action], env=env)
 +
 +
 +def main():
 +    args = sys.argv[1:]
 +    if args == ['snapshot']:
 +        s = snapshot()
-+        c = native_state()
-+        s['coder'] = c
-+        s = merge_usage(s)
-+        if c['pid']:
++        states = {key: native_state(prof) for key, prof in PROFILES.items()}
++        for key, state in states.items():
++            s[key] = state
++            s = merge_usage(s, PROFILES[key])
++        if any(state['pid'] for state in states.values()):
 +            for g in s.get('gpus', []):
 +                if g.get('key') in KEYS:
 +                    g.update(busy=True, held=True)
 +            for k in s.get('kinds', []):
 +                k['free'] = [key for key in k.get('free', []) if key not in KEYS]
 +        print(json.dumps(s))
-+    elif len(args) == 1 and args[0] in ('coder-start', 'coder-stop', 'coder-pi', 'coder-claude', 'coder-hermes', 'coder-piharness', 'coder-logs'):
-+        subprocess.Popen(['omarchy-launch-tui', '--app-id=org.omarchy.coder', str(Path(__file__).resolve()),
-+                          '--terminal', args[0][6:]], start_new_session=True,
++    elif len(args) == 1 and '-' in args[0] and args[0].split('-', 1)[0] in PROFILES \
++            and args[0].split('-', 1)[1] in ACTIONS:
++        prof = args[0].split('-', 1)[0]
++        subprocess.Popen(['omarchy-launch-tui', '--app-id=org.omarchy.' + prof, str(Path(__file__).resolve()),
++                          '--terminal', prof, args[0].split('-', 1)[1]], start_new_session=True,
 +                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-+    elif len(args) == 2 and args[0] == '--terminal' and args[1] in ('start', 'stop', 'pi', 'claude', 'hermes', 'piharness', 'logs'):
++    elif args and args[0] == '--terminal' and len(args) in (2, 3) \
++            and (args[-1] in ACTIONS) and (len(args) == 2 or args[1] in PROFILES):
++        prof_name, action = (args[1], args[2]) if len(args) == 3 else ('coder', args[1])
 +        try:
-+            rc = terminal(args[1])
++            rc = terminal(PROFILES[prof_name], action)
 +        except SystemExit as e:
 +            rc = e.code
-+        if rc or args[1] == 'logs':
++        if rc or action == 'logs':
 +            try:
 +                input('\nPress Enter to close. ')
 +            except EOFError:
@@ -405,8 +683,9 @@ index 0000000..ad667a9
 +        return rc
 +    elif args and args[0] == 'run':
 +        with start_lock():
-+            if native_state()['pid'] and len(args) > 2 and KEYS.intersection(args[2].split(',')):
-+                fail('Stop coder.sh in Local AI before starting another model on these GPUs.')
++            busy = next((p for p in PROFILES.values() if native_state(p)['pid']), None)
++            if busy and len(args) > 2 and KEYS.intersection(args[2].split(',')):
++                fail(f"Stop {busy['script'].name} in Local AI before starting another model on these GPUs.")
 +            return subprocess.call([str(BACKEND), *args])
 +    else:
 +        os.execv(str(BACKEND), [str(BACKEND), *args])

@@ -17,6 +17,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { detectStaleBuild, formatStaleBuild } from "./build-info.js";
 import { loadConfig, type HarnessConfig } from "./config.js";
 import { ensureAgentDir, outputBudget } from "./pi/agent-dir.js";
 import { createHarnessSession, type HarnessSession, type NormalizedEvent } from "./pi/session.js";
@@ -1328,12 +1330,28 @@ function packageVersion(): string {
   }
 }
 
+/**
+ * A checkout runs `dist/`, not `src/`: editing the sources changes nothing
+ * until `npm run build`. That once meant a fixed bug was still on screen days
+ * later, because the binary was a stale bundle. Say it once, on stderr, before
+ * the TUI takes the screen. Installed packages have no `src/` and stay silent.
+ */
+function warnIfStaleBuild(): void {
+  if (process.env.PIHARNESS_NO_STALE_WARNING) return;
+  const entry = fileURLToPath(import.meta.url);
+  if (!entry.endsWith(".js")) return; // running from src under tsx: not a bundle
+  const stale = detectStaleBuild(entry, fileURLToPath(new URL("../src", import.meta.url)));
+  if (stale) console.error(formatStaleBuild(stale));
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.includes("--version") || argv.includes("-v")) {
     console.log(`piharness ${packageVersion()}`);
     return;
   }
+
+  warnIfStaleBuild();
 
   const args = parseArgs(process.argv);
 

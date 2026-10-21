@@ -10,15 +10,18 @@ omarchy-restart-shell
 ```
 
 - `bin/omarchy-local-ai-coder` (new): wraps `bin/omarchy-local-ai`. Its
-  `snapshot` verb adds a `coder` block describing coder.sh's llama-server
-  (detected by process args `qwen38` + `8080`, never by a hard-coded pid), and
-  forwards every other verb to the real backend, including `run`, which is
-  refused while coder.sh holds the GPUs.
-- `Panel.qml`: its `cli` points at the wrapper, and `coder|<agent>` actions run
-  `coder-<agent>` (which opens a terminal and launches that agent through
-  `~/coder.sh`).
-- `Model.js`: the home view gets a `CODER.SH · QWEN3.8 27B` section with the
-  server state, context, **live token counters**, speed, and the agent buttons
+  `snapshot` verb adds a `coder` block for coder.sh (Qwen3.8 27B, alias
+  `qwen38`) and a `codernew` block for codernew.sh (Swift 1.5 Qwen3.8 27B,
+  alias `qwen38new`), each detected by process args `alias` + `8080`, never by
+  a hard-coded pid, and forwards every other verb to the real backend,
+  including `run`, which is refused while a coder server holds the GPUs. Both
+  scripts listen on 8080: the wrapper stops the other one before a Start.
+- `Panel.qml`: its `cli` points at the wrapper, and `coder|<agent>` /
+  `codernew|<agent>` actions run `coder-<agent>` / `codernew-<agent>` (which
+  open a terminal and launch that agent through the matching script).
+- `Model.js`: the home view gets a `CODER.SH · QWEN3.8 27B` section and a
+  `CODERNEW · SWIFT 1.5 27B` section, each with the server state, context,
+  **live token counters**, speed, and the agent buttons
   `Start / Stop / Claude / Pi / piharness / Hermes / Logs`.
 
 The token line is not the gateway's usage log (that never sees a native
