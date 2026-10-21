@@ -16,6 +16,7 @@ import {
 } from "../context/memory.js";
 import { fetchPage, searchWeb, WebError } from "./web.js";
 import { buildRepoMap, findCode, outlineFile, renderFindHits, renderRepoMap } from "./code.js";
+import { environmentBlock } from "../context/environment.js";
 
 export interface BuiltinDeps {
   cwd: string;
@@ -283,7 +284,9 @@ export const CODING_GUIDELINES = [
 
 /** Build the per-turn "harness state" block. Empty when there is nothing to say. */
 export function renderHarnessContext(deps: BuiltinDeps): string {
-  const parts: string[] = [];
+  // Facts first: what this machine can actually run decides which plan is
+  // possible, and the model cannot see the machine any other way.
+  const parts: string[] = [environmentBlock()];
   let todos: string;
   try {
     todos = renderTodos({ version: 1, items: openTodos(deps.cwd) }, { limit: 10 });

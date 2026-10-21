@@ -12,6 +12,7 @@ import { buildSkillsBlock } from "../context/index.js";
 import { FlailGuard, renderFlailNudge } from "../quality/flail.js";
 import { buildRepoMap, invalidateCodeIndex, renderRepoMap } from "../extensions/code.js";
 import { renderHarnessContext } from "../extensions/builtin.js";
+import { environmentBlock } from "../context/environment.js";
 import { clampText, type HarnessExtension, type HarnessTool } from "../extensions/types.js";
 
 /**
@@ -29,6 +30,7 @@ const WORKING_RULES = [
   "- No placeholders, no TODO stubs, no \"rest of the implementation here\".",
   "- Before writing code that depends on numbers (positions, sizes, timing, physics), compute them with a one-line command and look at the result. If a probe contradicts your reasoning, the probe is right.",
   "- Work that needs more than a few tool calls starts with a todo list, and the list is updated as items finish. Do not hold a multi-step plan only in your head.",
+  "- Report what the output showed, not what you hoped: quote the line that proves it, or say it is unverified. Never open with praise for your own work.",
 ].join("\n");
 
 export interface InlineExtensionDeps {
@@ -72,6 +74,10 @@ export function harnessInlineExtensions(
     {
       name: "piharness",
       factory: (pi) => {
+        // Probe the machine while the session is still starting, not on the
+        // first turn: it costs ~300 ms of subprocesses and the user is already
+        // watching a banner, not a blinking cursor.
+        environmentBlock();
         for (const tool of tools) {
           pi.registerTool(toPiTool(tool, deps));
         }

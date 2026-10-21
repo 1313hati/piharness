@@ -852,3 +852,56 @@ turn in this repo emitted 7.9k chars of thinking (≈130 lines at 100 columns),
 all of it printed inline. Linear is not the same as readable; capping a thought
 run to head + tail with a `… N lines` counter is the obvious next step, but it
 changes what M16 deliberately made visible, so it is not in this change.
+
+## M20: the model cannot see the machine, so it guesses — and the guesses cost calls
+
+The complaint was "the harness is dumb". The recorded session that produced it
+(`~/.config/piharness/agent/sessions/--home-hati--/2026-10-21T21-54…jsonl`, ask:
+"create a 3d model of a dog in voxel style, then run it") shows where the
+dumbness actually comes from, and most of it is not intelligence:
+
+1. It wrote `visualize.py` importing numpy and matplotlib **before checking
+   anything**, then spent five tool calls discovering the obvious:
+   `pip install` (127) → `python3 visualize.py` (ModuleNotFoundError) →
+   `pip3 install` (127) → `which python3 && python3 --version` →
+   `python3 -m pip install` (No module named pip) — and only then rewrote the
+   viewer in stdlib Python. Six calls where two would do.
+2. It reported the result as "Perfect! … 3D View" while showing two ASCII
+   slices of an 9×5×2 model. Nothing in the harness asked it for the line that
+   proves the claim.
+
+**Fix 1 — the machine block.** `src/context/environment.ts`: once per process,
+one batched `command -v` sweep, version probes for the five tools a turn
+actually branches on, a functional probe for python packaging
+(`python3 -m pip` / `pip3` / `uv` must *run*, presence is not enough) and one
+`python3 -c importlib.util` check for numpy/PIL/matplotlib/requests/yaml. It
+renders as a five-line block at the top of the per-turn context:
+
+    ## This machine (probed, not assumed)
+    - os: Omarchy; shell: /usr/bin/bash
+    - installed: python3 3.14.7, node 26.12.1, npm 11.20.0, npx, uv 0.13.4, …
+    - not installed: bun, go — do not call them
+    - python packaging: pip3 26.2.1, uv 0.13.4
+    - system python3 can import: PIL, requests (anything else needs an install…)
+
+Cost: 309 ms cold, cached afterwards, and pre-warmed in the extension factory
+so the first turn does not pay it. 438 chars of prompt. On a machine without a
+working installer the third line reads "none works — do not try to install
+packages; write stdlib-only Python or ask", which is the sentence that would
+have saved those five calls.
+
+**Fix 2 — no unearned success.** One working rule: "Report what the output
+showed, not what you hoped: quote the line that proves it, or say it is
+unverified. Never open with praise for your own work."
+
+**Checks:** `npm test` 202 tests (6 new in `tests/environment.test.ts`, one of
+them a wiring test that the block reaches `renderHarnessContext`, since a block
+the model never receives is just dead code); `npm run typecheck`, `npm run
+build` pass; `dist/context/environment.js` renders the block on this machine.
+
+**What this does not fix.** A 27B Q4 model that draws a flat slab and calls it
+a dog is a model problem, not a harness one; the harness can stop it wasting
+calls and stop it claiming unverified success, but it cannot make it draw. The
+next two harness-side candidates, in order of expected value: a planning gate
+(first edit of a turn with no open todos gets one nudge, same mechanism as the
+flail guard) and a `read` budget so a 2000-line file does not eat the window.
