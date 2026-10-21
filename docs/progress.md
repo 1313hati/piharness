@@ -955,3 +955,23 @@ against a real local turn — one interactive run with a deliberate edit-only tu
 should show the extra request and the nudge in the transcript. The planning gate
 (first edit of a turn with no open todos) is still unbuilt, and the reasoning
 volume (7.9k chars in one turn) is still uncapped by decision.
+
+### M21 live proof (local minicpm47, /tmp/pv-probe)
+
+Two runs against the real CLI, not the test harness:
+
+1. "The test in math.test.js fails. Fix math.js so npm test passes." — read,
+   read, edit, `npm test`. The gate stayed silent because the turn verified
+   itself; that is the correct behaviour and the reason it is not noise.
+2. "Add a one-line comment at the top of math.js." — read, edit, "Done." …
+   then `[agent started]` again on its own, `npm test`, and:
+
+       **verified:** `npm test` ran successfully … ✔ add … 0 failures
+       **changed:** Added the comment …
+       **unverified:** None
+
+   That second request is `agent_before_settle` returning `continue: true`, and
+   the model quoting the test line is the evidence rule arriving through it.
+   Cost of the gate: one extra request on a code-edit turn that would otherwise
+   have stopped unverified. On a local model that is seconds; on a paid API it
+   is one more turn of tokens — the trade is deliberate.
