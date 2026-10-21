@@ -825,7 +825,7 @@ source under `tsx`; `PIHARNESS_NO_STALE_WARNING=1` silences it.
 
 **Checks**
 
-- `npm run typecheck`, `npm run build`, `npm test` — all pass, 191 tests.
+- `npm run typecheck`, `npm run build`, `npm test` — all pass, 195 tests.
 - `dist/ui/blocks.js` now contains `TranscriptBuilder` (`grep -c` 0 → 1).
 - Screen-level replay of the *built* bundle: real `runTui`, fake 100x40
   terminal with a VT emulator, 3 short turns then a long one (reasoning,
@@ -836,6 +836,16 @@ source under `tsx`; `PIHARNESS_NO_STALE_WARNING=1` silences it.
   the zero above is a measurement, not an absence of events.
 - New tests: `tests/build-info.test.ts` (6) — newest-source detection, stale
   and fresh bundles, missing `src/`/entry, sub-second tolerance.
+- New tests: `tests/render-order.test.ts` (4) — the real `TuiMainScreen` on a
+  fake 100x40 terminal with a small VT emulator: no `ESC[2J`/`ESC[3J` across a
+  long turn, the bottom two rows always match the buffer, an append never
+  rewrites the lines above it, and text after a call renders after the call.
+  Proven to bite: dropping `sealAssistant()` from `append()` (the old model)
+  makes the append-order test fail; restored, 195 pass.
+- The clear path is explicit in pi-tui: `firstChanged < prevViewportTop →
+  fullRender(true)`, and `fullRender(true)` writes `ESC[2J ESC[H ESC[3J`. Any
+  future block that mutates above the viewport reintroduces the bug, which is
+  what these tests are for.
 
 **Next:** reasoning volume is now the remaining wall of text — a real `qwen38`
 turn in this repo emitted 7.9k chars of thinking (≈130 lines at 100 columns),
