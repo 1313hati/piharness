@@ -286,7 +286,7 @@ export const CODING_GUIDELINES = [
 export function renderHarnessContext(deps: BuiltinDeps): string {
   // Facts first: what this machine can actually run decides which plan is
   // possible, and the model cannot see the machine any other way.
-  const parts: string[] = [environmentBlock()];
+  const parts: string[] = [environmentBlock(deps.cwd)];
   let todos: string;
   try {
     todos = renderTodos({ version: 1, items: openTodos(deps.cwd) }, { limit: 10 });

@@ -905,3 +905,53 @@ calls and stop it claiming unverified success, but it cannot make it draw. The
 next two harness-side candidates, in order of expected value: a planning gate
 (first edit of a turn with no open todos gets one nudge, same mechanism as the
 flail guard) and a `read` budget so a 2000-line file does not eat the window.
+
+## M21: coding quality as a gate, not a request
+
+"Poor at coding" has a mechanical core, and the voxel session shows it: the
+model wrote four files, ran the viewer once (it crashed), rewrote it, then
+announced "Perfect! … 3D View" over output that was two ASCII slices. The
+working rules already said "run the project's test or build command before
+claiming success" and were ignored — a rule the loop does not enforce is a
+suggestion. Three deterministic guards now sit in the loop.
+
+**1. Settle gate (`agent_before_settle`).** If a turn edited a code file and
+ran no test/build/run, pi appends one message and makes one more request:
+"You edited a.ts and ran no test, build, or run of it… A turn that changed code
+and verified nothing is unverified, not finished. Run npm test, read the
+output, fix what it reports." Bounded: code files only (a README edit does not
+trigger it), once per turn (`markNudged`), and never on an aborted or errored
+run. `agent_before_settle` is the documented boundary that "may append entries
+and ensure one next provider request" — the alternative would have been a
+prompt rule, which is what already failed.
+
+**2. Read-before-edit (`tool_call` block).** `edit` on a path this session
+never saw is refused with a reason: "read a.ts before editing it. edit replaces
+exact text, and a file edited from memory is how content silently disappears."
+Reading counts whether it came from the `read` tool or a `cat`/`head`/`sed` in
+bash, and a file the session wrote counts as known. One blocked call is cheaper
+than the corrupted file it prevents.
+
+**3. Project checks in the machine block.** `src/context/project.ts` reads
+package.json scripts (typecheck → test → build), tsconfig, Cargo.toml, go.mod,
+pyproject, a Makefile `test:` target, and states up to three commands:
+
+    - project checks (run before you say it works): npm run typecheck, npm test, npm run build
+
+The settle nudge names those commands, so "verify it" arrives as `npm test`,
+not as a vague instruction the model has to translate.
+
+**Checks:** `npm test` 213 tests. New: `tests/verify.test.ts` (7 — classification
+of verification commands, including the negatives `npm install` / `npm run dev`
+/ `pip install`, edit-vs-check accounting, read guard) and
+`tests/extensions-wiring.test.ts` (4 — drives the real factory with a stub `pi`
+and replays `tool_execution_*`, `tool_call` and `agent_before_settle`, so a
+renamed event or changed field fails the suite instead of failing silently in
+the TUI). `npm run typecheck` and `npm run build` pass; the built
+`dist/pi/extensions.js` contains the gate.
+
+**Still open:** the settle gate is tested against pi's event contract, not yet
+against a real local turn — one interactive run with a deliberate edit-only turn
+should show the extra request and the nudge in the transcript. The planning gate
+(first edit of a turn with no open todos) is still unbuilt, and the reasoning
+volume (7.9k chars in one turn) is still uncapped by decision.

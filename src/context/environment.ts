@@ -12,6 +12,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { detectProjectChecks, renderProjectChecks } from "./project.js";
 
 export interface ExecResult {
   /** Exit status was zero and stdout was captured. */
@@ -161,7 +162,7 @@ export function detectEnvironment(run: Runner = defaultRunner): EnvReport {
  * turn, so it states only what changes a decision — the absences most of all,
  * plus whether a python script may import anything beyond the stdlib.
  */
-export function renderEnvironment(report: EnvReport, maxChars = 900): string {
+export function renderEnvironment(report: EnvReport, maxChars = 1000, projectLine = ""): string {
   const lines = [`## This machine (probed, not assumed)`, `- os: ${report.os}; shell: ${report.shell}`];
   if (report.present.length > 0) lines.push(`- installed: ${report.present.join(", ")}`);
   if (report.absent.length > 0) {
@@ -175,20 +176,23 @@ export function renderEnvironment(report: EnvReport, maxChars = 900): string {
         : `- system python3 imports no third-party modules: write stdlib-only Python or say what you need`,
     );
   }
+  if (projectLine) lines.push(projectLine);
   const text = lines.join("\n");
   return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\n… [environment block truncated]`;
 }
 
-let cached: string | null = null;
+const cache = new Map<string, string>();
 
-/** Cached per process: the machine does not change mid-session. */
-export function environmentBlock(): string {
-  if (cached === null) {
-    try {
-      cached = renderEnvironment(detectEnvironment());
-    } catch {
-      cached = "";
-    }
+/** Cached per workspace: the machine does not change mid-session. */
+export function environmentBlock(cwd: string = process.cwd()): string {
+  const hit = cache.get(cwd);
+  if (hit !== undefined) return hit;
+  let text = "";
+  try {
+    text = renderEnvironment(detectEnvironment(), 1000, renderProjectChecks(detectProjectChecks(cwd)));
+  } catch {
+    text = "";
   }
-  return cached;
+  cache.set(cwd, text);
+  return text;
 }

@@ -10,9 +10,11 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { buildSkillsBlock } from "../context/index.js";
 import { FlailGuard, renderFlailNudge } from "../quality/flail.js";
+import { ReadBeforeEdit, TurnGuard, renderVerifyNudge } from "../quality/verify.js";
 import { buildRepoMap, invalidateCodeIndex, renderRepoMap } from "../extensions/code.js";
 import { renderHarnessContext } from "../extensions/builtin.js";
 import { environmentBlock } from "../context/environment.js";
+import { detectProjectChecks } from "../context/project.js";
 import { clampText, type HarnessExtension, type HarnessTool } from "../extensions/types.js";
 
 /**
@@ -77,7 +79,7 @@ export function harnessInlineExtensions(
         // Probe the machine while the session is still starting, not on the
         // first turn: it costs ~300 ms of subprocesses and the user is already
         // watching a banner, not a blinking cursor.
-        environmentBlock();
+        environmentBlock(deps.cwd);
         for (const tool of tools) {
           pi.registerTool(toPiTool(tool, deps));
         }
@@ -85,12 +87,43 @@ export function harnessInlineExtensions(
         // the same call repeated, probes with no check) and says so before the
         // next turn. Deterministic: it counts, it does not judge.
         const flail = new FlailGuard();
+        // Coding quality guards: count edits against checks, and refuse to edit
+        // a file this session never saw. Both are deterministic; neither asks
+        // the model to be more careful.
+        const guard = new TurnGuard();
+        const readGuard = new ReadBeforeEdit(deps.cwd);
+        const projectChecks = detectProjectChecks(deps.cwd).commands;
+        const callArgs = new Map<string, { name: string; args: unknown }>();
         const editsCode = new Set(["write", "edit", "patch", "apply_patch", "multiedit", "bash"]);
         pi.on("tool_execution_start", (event) => {
           flail.start(event.toolCallId, event.toolName, event.args);
+          callArgs.set(event.toolCallId, { name: event.toolName, args: event.args });
+          const input = event.args as Record<string, unknown> | undefined;
+          const path = typeof input?.path === "string" ? input.path : undefined;
+          if (event.toolName === "read" && path) readGuard.noteRead(path);
+          if (event.toolName === "write" && path) readGuard.noteWrite(path);
+          if (event.toolName === "bash" && typeof input?.command === "string") {
+            readGuard.noteBash(input.command);
+          }
+        });
+
+        // Editing a file from memory is the usual way content disappears from
+        // it; one blocked call costs less than the corruption it prevents.
+        pi.on("tool_call", (event) => {
+          if (event.toolName !== "edit") return undefined;
+          const input = event.input as Record<string, unknown> | undefined;
+          const path = typeof input?.path === "string" ? input.path : undefined;
+          if (!path) return undefined;
+          const reason = readGuard.blockReason(path);
+          return reason ? { block: true, reason } : undefined;
         });
         pi.on("tool_execution_end", (event) => {
           flail.end(event.toolCallId, event.isError);
+          const rec = callArgs.get(event.toolCallId);
+          if (rec) {
+            callArgs.delete(event.toolCallId);
+            guard.note({ name: rec.name, input: rec.args, failed: event.isError });
+          }
           // A file changed: the symbol index is stale from this moment, and a
           // stale `code_find` is worse than no index at all.
           if (!event.isError && editsCode.has(event.toolName)) invalidateCodeIndex();
@@ -121,6 +154,7 @@ export function harnessInlineExtensions(
         });
 
         pi.on("before_agent_start", (event) => {
+          guard.reset();
           const blocks: string[] = [renderHarnessContext(deps)];
           try {
             const nudge = flail.check();
@@ -165,6 +199,24 @@ export function harnessInlineExtensions(
           // Upstream's preamble says "inside pi"; this is its own front-end.
           const base = event.systemPrompt.replace("operating inside pi,", "operating inside piharness,");
           return { systemPrompt: `${base}\n\n${extra}` };
+        });
+
+        // The turn is about to end. If it changed code and never ran anything,
+        // ending it here is how "done" comes to mean "I typed something". One
+        // extra request, once per turn, with the evidence question asked.
+        pi.on("agent_before_settle", (event) => {
+          if (event.outcome !== "completed") return undefined;
+          try {
+            if (!guard.shouldNudge()) return undefined;
+            guard.markNudged();
+            const text = renderVerifyNudge(guard.editedFiles, guard.checkCommands, projectChecks);
+            return {
+              entries: [{ type: "custom_message", customType: "piharness-verify", content: text, display: true }],
+              continue: true,
+            };
+          } catch {
+            return undefined;
+          }
         });
       },
     },
